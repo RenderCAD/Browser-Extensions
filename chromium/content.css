@@ -1,0 +1,7 @@
+#rendercad-overlay {
+    box-sizing: border-box;
+}
+
+#rendercad-overlay * {
+    box-sizing: border-box;
+}

@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "RenderCAD",
+  "version": "1.2.0",
+  "description": "Transform CAD screenshots into photorealistic renders using AI",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "contextMenus",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://rendercad.ai/*"
+  ],
+  "action": {
+    "default_title": "RenderCAD - AI CAD Renderer"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["compare.html", "icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "icons/logo-16.png",
+    "48": "icons/logo-48.png",
+    "128": "icons/logo-128.png"
+  }
+}

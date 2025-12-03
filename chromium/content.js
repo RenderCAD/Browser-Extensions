@@ -1488,9 +1488,46 @@ function showSignInPrompt() {
     });
 }
 
-// Function to open/show the render modal
+// Function to close the render modal
+function closeRenderModal() {
+    console.log('[RenderCAD] closeRenderModal called');
+    if (loadingModalInstance) {
+        // Clean up any animations or intervals
+        if (typeof glowAnimationFrame !== 'undefined' && glowAnimationFrame) {
+            cancelAnimationFrame(glowAnimationFrame);
+        }
+        if (typeof tokenUpdateInterval !== 'undefined' && tokenUpdateInterval) {
+            clearInterval(tokenUpdateInterval);
+        }
+        // Hide the modal
+        loadingModalInstance.style.display = 'none';
+        loadingModalInstance.style.visibility = 'hidden';
+        console.log('[RenderCAD] Modal closed');
+    }
+}
+
+// Function to check if modal is currently open/visible
+function isModalOpen() {
+    if (!loadingModalInstance) {
+        return false;
+    }
+    const display = loadingModalInstance.style.display;
+    const visibility = loadingModalInstance.style.visibility;
+    const inDOM = document.body.contains(loadingModalInstance);
+    return inDOM && (display === 'flex' || display === '') && visibility !== 'hidden';
+}
+
+// Function to open/show the render modal (now toggles if already open)
 function openRenderModal() {
     console.log('[RenderCAD] openRenderModal called');
+    
+    // Check if modal is already open - if so, close it
+    if (isModalOpen()) {
+        console.log('[RenderCAD] Modal is already open, closing it');
+        closeRenderModal();
+        return;
+    }
+    
     if (!loadingModalInstance) {
         console.log('[RenderCAD] Creating new modal instance');
         loadingModalInstance = createLoadingModal();
@@ -1619,6 +1656,7 @@ function createLoadingModal() {
     `;
 
     // Logo wrapper with TM symbol - 5% smaller than 10% larger (42.24 * 0.95 = 40.128)
+    // Set font-size to match height so em units scale proportionally
     const logoWrapper = document.createElement('span');
     logoWrapper.style.cssText = `
         position: relative;
@@ -1626,6 +1664,7 @@ function createLoadingModal() {
         margin-right: 0.25rem;
         width: 40.128px;
         height: 33.44px;
+        font-size: 33.44px;
     `;
 
     const logo = document.createElement('img');
@@ -1649,15 +1688,18 @@ function createLoadingModal() {
     };
     logo.setAttribute('draggable', 'false');
 
-    // TM symbol for logo - 5% smaller than 10% larger (20.592 * 0.95 = 19.5624px)
+    // TM symbol for logo - scales with logo using em units for font-size, percentage for position
+    // Font-size: 19.5624px / 33.44px = 0.585em (scales with logo wrapper font-size)
+    // Position: 32.4px / 33.44px = 96.8% from top (scales with logo wrapper height)
+    // Right: -2px / 40.128px = -4.98% (scales with logo wrapper width)
     const logoTm = document.createElement('sup');
     logoTm.className = 'tm';
     logoTm.textContent = '™';
     logoTm.style.cssText = `
         position: absolute;
-        top: 32.4px;
-        right: -2px;
-        font-size: 19.5624px;
+        top: 96.8%;
+        right: -4.98%;
+        font-size: 0.585em;
         line-height: 0;
         font-family: 'Proxima Nova Thin', 'Inter', sans-serif;
         font-weight: 300;

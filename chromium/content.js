@@ -42,24 +42,250 @@ let resizeObserverTimeout = null;
 let handleWindowResize = null;
 let isUpdatingPosition = false; // Prevent concurrent position updates
 let lastUpdateTime = 0; // Track last update to prevent thrashing
+let selectedRenderMode = 'preserve';
+const RENDER_MODE_STORAGE_KEY = 'rendercad_render_mode';
+const VIEWPORT_GUTTER = 16;
+const UNPINNED_MODAL_WIDTH = 320;
+const PINNED_MODAL_WIDTH = 60;
+
+function normalizeRenderMode(mode) {
+    return mode === 'creative' ? 'creative' : 'preserve';
+}
+
+function clampValue(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
+
+function getResponsiveModalWidthCss() {
+    return `min(${UNPINNED_MODAL_WIDTH}px, calc(100vw - ${VIEWPORT_GUTTER * 2}px))`;
+}
+
+function applyUnpinnedModalWidth(modal) {
+    const responsiveWidth = getResponsiveModalWidthCss();
+    modal.style.setProperty('width', responsiveWidth, 'important');
+    modal.style.setProperty('min-width', responsiveWidth, 'important');
+    modal.style.setProperty('max-width', responsiveWidth, 'important');
+}
+
+function clampModalToViewport(modal) {
+    if (!modal || !document.body.contains(modal)) return;
+
+    const rect = modal.getBoundingClientRect();
+    const maxLeft = Math.max(VIEWPORT_GUTTER, window.innerWidth - rect.width - VIEWPORT_GUTTER);
+    const maxTop = Math.max(VIEWPORT_GUTTER, window.innerHeight - rect.height - VIEWPORT_GUTTER);
+
+    let left = rect.left;
+    let top = rect.top;
+
+    if (modal.style.right && modal.style.right !== 'auto') {
+        left = Math.max(VIEWPORT_GUTTER, window.innerWidth - rect.width - VIEWPORT_GUTTER);
+    }
+    if (!modal.style.top) {
+        top = VIEWPORT_GUTTER;
+    }
+
+    modal.style.position = 'fixed';
+    modal.style.left = clampValue(left, VIEWPORT_GUTTER, maxLeft) + 'px';
+    modal.style.top = clampValue(top, VIEWPORT_GUTTER, maxTop) + 'px';
+    modal.style.right = 'auto';
+    modal.style.bottom = 'auto';
+}
+
+function positionFloatingDropdown(dropdown, anchorRect) {
+    if (!dropdown || !anchorRect) return;
+
+    dropdown.style.maxWidth = `calc(100vw - ${VIEWPORT_GUTTER * 2}px)`;
+    dropdown.style.maxHeight = `calc(100vh - ${VIEWPORT_GUTTER * 2}px)`;
+    dropdown.style.overflowY = 'auto';
+    dropdown.style.visibility = 'hidden';
+    dropdown.style.display = 'block';
+
+    const dropdownRect = dropdown.getBoundingClientRect();
+    let left = anchorRect.right - dropdownRect.width;
+    let top = anchorRect.bottom + 2;
+
+    if (top + dropdownRect.height > window.innerHeight - VIEWPORT_GUTTER) {
+        top = anchorRect.top - dropdownRect.height - 2;
+    }
+
+    left = clampValue(left, VIEWPORT_GUTTER, Math.max(VIEWPORT_GUTTER, window.innerWidth - dropdownRect.width - VIEWPORT_GUTTER));
+    top = clampValue(top, VIEWPORT_GUTTER, Math.max(VIEWPORT_GUTTER, window.innerHeight - dropdownRect.height - VIEWPORT_GUTTER));
+
+    dropdown.style.left = left + 'px';
+    dropdown.style.top = top + 'px';
+    dropdown.style.right = 'auto';
+    dropdown.style.bottom = 'auto';
+    dropdown.style.visibility = 'visible';
+}
+
+function hideFloatingMenus() {
+    const pinnedDropdown = document.querySelector('.rendercad-options-dropdown');
+    const unpinnedDropdown = document.querySelector('.rendercad-unpinned-options-dropdown');
+
+    if (pinnedDropdown) {
+        pinnedDropdown.style.display = 'none';
+    }
+
+    if (unpinnedDropdown) {
+        unpinnedDropdown.style.display = 'none';
+    }
+}
+
+function setHeaderButtonTransform(button, scale = 1) {
+    button.style.transform = `scale(${scale})`;
+}
+
+function applyImportantStyles(element, styles) {
+    Object.entries(styles).forEach(([property, value]) => {
+        element.style.setProperty(property, value, 'important');
+    });
+}
+
+function setCaptureOptionButtonState(button, state = 'default') {
+    const palettes = {
+        default: {
+            background: 'linear-gradient(-75deg, rgba(255,255,255,0.12), rgba(255,255,255,0.04), rgba(255,255,255,0.12))',
+            'background-color': 'rgba(8, 12, 18, 0.98)',
+            border: '1px solid rgba(255,255,255,0.88)',
+            color: '#ffffff',
+            'webkit-text-fill-color': '#ffffff',
+            'box-shadow': '0 4px 12px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 -1px 0 rgba(0, 0, 0, 0.36)'
+        },
+        hover: {
+            background: 'linear-gradient(-75deg, rgba(255,255,255,0.16), rgba(255,255,255,0.08), rgba(255,255,255,0.16))',
+            'background-color': 'rgba(14, 20, 30, 0.99)',
+            border: '1px solid rgba(255,255,255,0.96)',
+            color: '#ffffff',
+            'webkit-text-fill-color': '#ffffff',
+            'box-shadow': '0 6px 16px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.2), inset 0 -1px 0 rgba(0, 0, 0, 0.36)'
+        },
+        active: {
+            background: 'linear-gradient(-75deg, rgba(80,190,255,0.34), rgba(15,98,148,0.12), rgba(80,190,255,0.34))',
+            'background-color': 'rgba(6, 48, 70, 0.99)',
+            border: '1px solid rgba(134,228,255,1)',
+            color: '#f7fdff',
+            'webkit-text-fill-color': '#f7fdff',
+            'box-shadow': '0 6px 18px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(134,228,255,0.24), inset 0 1px 0 rgba(255, 255, 255, 0.18)'
+        },
+        pressed: {
+            background: 'linear-gradient(-75deg, rgba(255,255,255,0.18), rgba(255,255,255,0.08), rgba(255,255,255,0.18))',
+            'background-color': 'rgba(18, 26, 38, 1)',
+            border: '1px solid rgba(255,255,255,0.96)',
+            color: '#ffffff',
+            'webkit-text-fill-color': '#ffffff',
+            'box-shadow': '0 3px 10px rgba(0, 0, 0, 0.58), inset 0 2px 3px rgba(0, 0, 0, 0.24), inset 0 -1px 0 rgba(255, 255, 255, 0.12)'
+        }
+    };
+
+    const sharedStyles = {
+        all: 'unset',
+        appearance: 'none',
+        '-webkit-appearance': 'none',
+        display: 'inline-flex',
+        'align-items': 'center',
+        'justify-content': 'center',
+        'box-sizing': 'border-box',
+        'min-height': '32px',
+        padding: '6px 12px',
+        'border-radius': '4px',
+        cursor: 'pointer',
+        'font-family': 'Segoe UI, Arial, sans-serif',
+        'font-size': '12px',
+        'font-weight': '700',
+        'line-height': '1',
+        'text-align': 'center',
+        'text-shadow': '0 1px 2px rgba(0, 0, 0, 0.82)',
+        transition: 'background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease',
+        'user-select': 'none'
+    };
+
+    applyImportantStyles(button, {
+        ...sharedStyles,
+        ...(palettes[state] || palettes.default)
+    });
+}
+
+function applyConfirmButtonInlineStyles(button) {
+    applyImportantStyles(button, {
+        appearance: 'none',
+        '-webkit-appearance': 'none',
+        position: 'fixed',
+        top: '0',
+        left: '0',
+        background: 'linear-gradient(-75deg, rgba(0,255,100,0.2), rgba(100,255,100,0.3), rgba(0,255,100,0.2))',
+        border: '2px solid rgba(0,255,100,0.9)',
+        color: '#ffffff',
+        '-webkit-text-fill-color': '#ffffff',
+        padding: '10px 20px',
+        'border-radius': '50%',
+        cursor: 'pointer',
+        'font-family': 'Segoe UI, Arial, sans-serif',
+        'font-size': '20px',
+        'font-weight': '600',
+        'line-height': '1',
+        'text-align': 'center',
+        'text-shadow': '0 1px 2px rgba(0, 0, 0, 0.75)',
+        'backdrop-filter': 'blur(4px)',
+        '-webkit-backdrop-filter': 'blur(4px)',
+        'box-shadow': '0 0 12px rgba(0,255,100,0.6), inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5)',
+        transition: 'all 0.2s ease',
+        'z-index': '1000010',
+        width: '50px',
+        height: '50px',
+        display: 'flex',
+        'align-items': 'center',
+        'justify-content': 'center',
+        'box-sizing': 'border-box',
+        'pointer-events': 'auto',
+        'user-select': 'none',
+        'will-change': 'transform'
+    });
+}
+
+async function getStoredRenderModePreference() {
+    try {
+        if (!chrome.runtime?.id) {
+            return selectedRenderMode;
+        }
+
+        const result = await chrome.storage.local.get([RENDER_MODE_STORAGE_KEY]);
+        return normalizeRenderMode(result[RENDER_MODE_STORAGE_KEY]);
+    } catch (error) {
+        return selectedRenderMode;
+    }
+}
+
+async function storeRenderModePreference(mode) {
+    selectedRenderMode = normalizeRenderMode(mode);
+
+    try {
+        if (!chrome.runtime?.id) {
+            return;
+        }
+
+        await chrome.storage.local.set({ [RENDER_MODE_STORAGE_KEY]: selectedRenderMode });
+    } catch (error) {
+        console.warn('Could not save render mode preference:', error);
+    }
+}
 
 chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
-    console.log('[RenderCAD Content] Message received:', request.action);
+    console.log('[RENDERCAD Content] Message received:', request.action);
     if (request.action === 'startScreenCapture') {
         startScreenCapture();
         sendResponse({success: true});
     } else if (request.action === 'openModal') {
-        console.log('[RenderCAD Content] Opening modal...');
+        console.log('[RENDERCAD Content] Opening modal...');
         openRenderModal();
         sendResponse({success: true});
     } else if (request.action === 'displayRenderedImage') {
-        console.log('[RenderCAD Content] Received displayRenderedImage, image size:', request.renderedImage?.length);
+        console.log('[RENDERCAD Content] Received displayRenderedImage, image size:', request.renderedImage?.length);
         try {
             displayRenderedImage(request.originalImage, request.renderedImage, request.rect, request.jobId);
-            console.log('[RenderCAD Content] displayRenderedImage completed successfully');
+            console.log('[RENDERCAD Content] displayRenderedImage completed successfully');
             sendResponse({success: true});
         } catch (error) {
-            console.error('[RenderCAD Content] Error in displayRenderedImage:', error);
+            console.error('[RENDERCAD Content] Error in displayRenderedImage:', error);
             sendResponse({success: false, error: error.message});
         }
     } else if (request.action === 'renderError') {
@@ -69,14 +295,26 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
 });
 
 async function startScreenCapture() {
-    if (isCapturing) return;
+    console.log('[RENDERCAD Content] startScreenCapture called, isCapturing:', isCapturing);
+    
+    if (isCapturing) {
+        console.log('[RENDERCAD Content] Already capturing, ignoring');
+        return;
+    }
     
     // Check authentication before starting capture
+    console.log('[RENDERCAD Content] Checking authentication...');
     const isAuthenticated = await checkAuthentication();
+    console.log('[RENDERCAD Content] Authentication status:', isAuthenticated);
+    
     if (!isAuthenticated) {
+        console.log('[RENDERCAD Content] Not authenticated, showing sign in prompt');
         showSignInPrompt();
         return;
     }
+    
+    console.log('[RENDERCAD Content] Starting capture UI...');
+    selectedRenderMode = await getStoredRenderModePreference();
 
     // Restore previous capture position if available (cleared on fresh extension start)
     let savedPosition = null;
@@ -139,44 +377,57 @@ async function startScreenCapture() {
         }
 
         .rendercad-aspect-btn {
-            background: linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05));
-            border: 1px solid rgba(255,255,255,0.5);
+            background: linear-gradient(-75deg, rgba(255,255,255,0.12), rgba(255,255,255,0.04), rgba(255,255,255,0.12));
+            background-color: rgba(8, 12, 18, 0.96);
+            border: 1px solid rgba(255,255,255,0.82);
             color: white;
             padding: 6px 12px;
-            margin: 0 4px;
+            margin: 0;
             border-radius: 4px;
             cursor: pointer;
             font-family: 'Segoe UI', Arial, sans-serif;
             font-size: 12px;
             font-weight: 600;
+            line-height: 1;
+            min-height: 32px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
             backdrop-filter: blur(4px);
             -webkit-backdrop-filter: blur(4px);
-            box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.05),
-                inset 0 -1px 1px rgba(255, 255, 255, 0.5),
-                0 2px 4px rgba(0, 0, 0, 0.2);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.18),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.35);
             transition: all 0.2s ease;
         }
 
         .rendercad-aspect-btn:hover {
-            background: linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1));
-            box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.05),
-                inset 0 -1px 1px rgba(255, 255, 255, 0.5),
-                0 2px 6px rgba(0, 0, 0, 0.3);
+            background: linear-gradient(-75deg, rgba(255,255,255,0.16), rgba(255,255,255,0.07), rgba(255,255,255,0.16));
+            background-color: rgba(15, 22, 32, 0.98);
+            border-color: rgba(255,255,255,0.92);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.52),
+                inset 0 1px 0 rgba(255, 255, 255, 0.22),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.35);
         }
 
         .rendercad-aspect-btn:active {
-            background: linear-gradient(-75deg, rgba(255,255,255,0.15), rgba(255,255,255,0.4), rgba(255,255,255,0.15));
-            box-shadow: inset 0 2px 2px rgba(0, 0, 0, 0.1),
-                inset 0 -1px 1px rgba(255, 255, 255, 0.5),
-                0 1px 3px rgba(0, 0, 0, 0.4);
+            background: linear-gradient(-75deg, rgba(255,255,255,0.18), rgba(255,255,255,0.08), rgba(255,255,255,0.18));
+            background-color: rgba(18, 27, 38, 0.99);
+            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5),
+                inset 0 2px 2px rgba(0, 0, 0, 0.18),
+                inset 0 -1px 0 rgba(255, 255, 255, 0.12);
             transform: scale(0.98);
         }
 
         .rendercad-aspect-btn.active {
-            background: linear-gradient(-75deg, rgba(0,255,255,0.2), rgba(250,255,112,0.2), rgba(255,192,203,0.2));
-            border: 1px solid rgba(0,255,255,0.8);
-            box-shadow: 0 0 8px rgba(0,255,255,0.5),
-                inset 0 1px 1px rgba(0, 0, 0, 0.05);
+            background: linear-gradient(-75deg, rgba(45, 175, 255, 0.35), rgba(17, 126, 188, 0.12), rgba(45, 175, 255, 0.35));
+            background-color: rgba(6, 52, 74, 0.98);
+            border: 1px solid rgba(102, 221, 255, 0.95);
+            color: #f5fdff;
+            box-shadow: 0 0 0 1px rgba(102, 221, 255, 0.2),
+                0 6px 18px rgba(0, 0, 0, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.16);
         }
 
         .rendercad-confirm-btn {
@@ -543,7 +794,7 @@ async function startScreenCapture() {
     const instructions = document.createElement('div');
     instructions.style.cssText = `
         position: absolute;
-        top: 20px;
+        top: ${VIEWPORT_GUTTER}px;
         left: 50%;
         transform: translateX(-50%);
         background: rgba(0, 0, 0, 0.85);
@@ -555,26 +806,37 @@ async function startScreenCapture() {
         z-index: 1000010;
         backdrop-filter: blur(8px);
         -webkit-backdrop-filter: blur(8px);
+        width: min(540px, calc(100vw - ${VIEWPORT_GUTTER * 2}px));
+        max-height: calc(100vh - ${VIEWPORT_GUTTER * 2}px);
+        overflow-y: auto;
+        box-sizing: border-box;
     `;
     instructions.innerHTML = `
         <div style="text-align: center;">
             <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 4px;">
-                <img src="${chrome.runtime.getURL('icons/logo.svg')}" alt="RenderCAD" style="width: 20px; height: 20px;">
-                <strong style="font-size: 16px;">RenderCAD Screen Capture</strong>
+                <img src="${chrome.runtime.getURL('icons/logo.svg')}" alt="RENDERCAD" style="width: 20px; height: 20px;">
+                <strong style="font-size: 16px;">RENDERCAD Screen Capture</strong>
             </div>
             <div style="margin: 10px 0 8px 0;">Click and drag to select the CAD area to render</div>
-            <div style="margin: 8px 0;">
-                <strong style="font-size: 12px;">Aspect Ratio:</strong><br>
-                <div style="margin-top: 8px;">
-                    <button type="button" class="rendercad-aspect-btn ${aspectRatio === null ? 'active' : ''}" data-aspect="free">Free</button>
-                    <button type="button" class="rendercad-aspect-btn ${aspectRatio === 1 ? 'active' : ''}" data-aspect="1">1:1</button>
-                    <button type="button" class="rendercad-aspect-btn ${aspectRatio === 1.333 ? 'active' : ''}" data-aspect="1.333">4:3</button>
-                    <button type="button" class="rendercad-aspect-btn ${aspectRatio === 1.777 ? 'active' : ''}" data-aspect="1.777">16:9</button>
-                </div>
-            </div>
-            <small style="opacity: 0.8;">Press ESC to cancel</small>
-        </div>
-    `;
+             <div style="margin: 8px 0;">
+                 <strong style="font-size: 12px;">Aspect Ratio:</strong><br>
+                 <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;">
+                     <button type="button" class="rendercad-aspect-btn ${aspectRatio === null ? 'active' : ''}" data-aspect="free">Free</button>
+                     <button type="button" class="rendercad-aspect-btn ${aspectRatio === 1 ? 'active' : ''}" data-aspect="1">1:1</button>
+                     <button type="button" class="rendercad-aspect-btn ${aspectRatio === 1.333 ? 'active' : ''}" data-aspect="1.333">4:3</button>
+                     <button type="button" class="rendercad-aspect-btn ${aspectRatio === 1.777 ? 'active' : ''}" data-aspect="1.777">16:9</button>
+                 </div>
+             </div>
+             <div style="margin: 8px 0;">
+                 <strong style="font-size: 12px;">Render Mode:</strong><br>
+                 <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;">
+                     <button type="button" class="rendercad-aspect-btn rendercad-mode-btn ${selectedRenderMode === 'preserve' ? 'active' : ''}" data-render-mode="preserve">Exact</button>
+                     <button type="button" class="rendercad-aspect-btn rendercad-mode-btn ${selectedRenderMode === 'creative' ? 'active' : ''}" data-render-mode="creative">Enhance</button>
+                 </div>
+             </div>
+             <small style="opacity: 0.8;">Press ESC to cancel</small>
+         </div>
+     `;
 
     // Prevent clicks on instructions from starting selection
     instructions.addEventListener('mousedown', (e) => {
@@ -587,23 +849,40 @@ async function startScreenCapture() {
     overlay.appendChild(instructions);
 
     // Add event listeners for aspect ratio buttons
-    const aspectButtons = instructions.querySelectorAll('.rendercad-aspect-btn');
+    const aspectButtons = instructions.querySelectorAll('.rendercad-aspect-btn[data-aspect]');
     aspectButtons.forEach(btn => {
+        setCaptureOptionButtonState(btn, btn.classList.contains('active') ? 'active' : 'default');
+        btn.addEventListener('mouseenter', () => {
+            if (!btn.classList.contains('active')) {
+                setCaptureOptionButtonState(btn, 'hover');
+            }
+        });
+        btn.addEventListener('mouseleave', () => {
+            setCaptureOptionButtonState(btn, btn.classList.contains('active') ? 'active' : 'default');
+        });
         btn.addEventListener('mousedown', (e) => {
             e.stopPropagation();
             e.preventDefault();
+            if (!btn.classList.contains('active')) {
+                setCaptureOptionButtonState(btn, 'pressed');
+            }
         });
         btn.addEventListener('mouseup', (e) => {
             e.stopPropagation();
             e.preventDefault();
+            setCaptureOptionButtonState(btn, btn.classList.contains('active') ? 'active' : 'hover');
         });
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
             e.preventDefault();
             // Remove active class from all buttons
-            aspectButtons.forEach(b => b.classList.remove('active'));
+            aspectButtons.forEach(b => {
+                b.classList.remove('active');
+                setCaptureOptionButtonState(b, 'default');
+            });
             // Add active class to clicked button
             btn.classList.add('active');
+            setCaptureOptionButtonState(btn, 'active');
             // Set aspect ratio
             const aspect = btn.getAttribute('data-aspect');
             const newAspectRatio = aspect === 'free' ? null : parseFloat(aspect);
@@ -634,6 +913,42 @@ async function startScreenCapture() {
             }
 
             aspectRatio = newAspectRatio;
+        });
+    });
+
+    const renderModeButtons = instructions.querySelectorAll('.rendercad-mode-btn');
+    renderModeButtons.forEach(btn => {
+        setCaptureOptionButtonState(btn, btn.classList.contains('active') ? 'active' : 'default');
+        btn.addEventListener('mouseenter', () => {
+            if (!btn.classList.contains('active')) {
+                setCaptureOptionButtonState(btn, 'hover');
+            }
+        });
+        btn.addEventListener('mouseleave', () => {
+            setCaptureOptionButtonState(btn, btn.classList.contains('active') ? 'active' : 'default');
+        });
+        btn.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            if (!btn.classList.contains('active')) {
+                setCaptureOptionButtonState(btn, 'pressed');
+            }
+        });
+        btn.addEventListener('mouseup', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            setCaptureOptionButtonState(btn, btn.classList.contains('active') ? 'active' : 'hover');
+        });
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            renderModeButtons.forEach(b => {
+                b.classList.remove('active');
+                setCaptureOptionButtonState(b, 'default');
+            });
+            btn.classList.add('active');
+            setCaptureOptionButtonState(btn, 'active');
+            await storeRenderModePreference(btn.getAttribute('data-render-mode'));
         });
     });
     
@@ -1151,6 +1466,7 @@ function showConfirmButton() {
     confirmButton.className = 'rendercad-confirm-btn';
     confirmButton.innerHTML = '✓';
     confirmButton.type = 'button';
+    applyConfirmButtonInlineStyles(confirmButton);
 
     // CRITICAL: Store reference in the closure-scoped variable for resize listeners
     localConfirmButtonRef = confirmButton;
@@ -1160,6 +1476,7 @@ function showConfirmButton() {
     });
 
     confirmButton.addEventListener('click', async (e) => {
+        console.log('[RENDERCAD Content] Confirm button clicked!');
         e.stopPropagation();
         e.preventDefault();
 
@@ -1186,12 +1503,14 @@ function showConfirmButton() {
         }
 
         // Clean up capture UI first (this hides all the selection elements)
+        console.log('[RENDERCAD Content] Cleaning up capture UI...');
         cleanup();
 
         // Wait a brief moment for the UI to be removed from the DOM
         await new Promise(resolve => setTimeout(resolve, 100));
 
         // Then start the capture and show loading
+        console.log('[RENDERCAD Content] Starting captureArea...');
         captureArea(captureRect);
     });
 
@@ -1269,10 +1588,13 @@ function cleanup() {
 }
 
 async function captureArea(rect) {
+    console.log('[RENDERCAD Content] captureArea called with rect:', rect);
+    let jobId = null;
+    let modalWasVisible = false;
+    let savedModalDisplay = null;
+    
     try {
         // Hide ALL rendercad elements before capture to prevent them from being captured
-        let modalWasVisible = false;
-        let savedModalDisplay = null;
         if (loadingModalInstance) {
             if (loadingModalInstance.style.visibility !== 'hidden' &&
                 loadingModalInstance.style.display !== 'none') {
@@ -1288,15 +1610,30 @@ async function captureArea(rect) {
         // Wait for the browser to process the style changes
         await new Promise(resolve => setTimeout(resolve, 100));
 
-        // Show loading overlay and get job ID
-        const jobId = showLoadingOverlay();
-
-        // Restore modal visibility immediately after getting jobId
-        if (modalWasVisible && loadingModalInstance) {
-            loadingModalInstance.style.visibility = 'visible';
-            loadingModalInstance.style.display = savedModalDisplay || 'flex';
-            loadingModalInstance.style.opacity = '1';
+        // Ensure modal exists and is visible
+        if (!loadingModalInstance) {
+            console.log('[RENDERCAD Content] Creating modal for first time');
+            loadingModalInstance = createLoadingModal();
         }
+        
+        // Make sure modal is in the DOM and visible
+        if (!document.body.contains(loadingModalInstance)) {
+            document.body.appendChild(loadingModalInstance);
+        }
+        
+        // Force modal visible
+        loadingModalInstance.style.display = 'flex';
+        loadingModalInstance.style.visibility = 'visible';
+        loadingModalInstance.style.opacity = '1';
+        if (!loadingModalInstance.hasAttribute('data-pinned')) {
+            applyUnpinnedModalWidth(loadingModalInstance);
+        }
+        setTimeout(() => clampModalToViewport(loadingModalInstance), 60);
+        
+        // Show loading overlay and get job ID
+        console.log('[RENDERCAD Content] Showing loading overlay...');
+        jobId = showLoadingOverlay();
+        console.log('[RENDERCAD Content] Loading overlay shown, jobId:', jobId);
 
         // Request screen capture from background script
         // Note: We don't use a callback here because the render is async and takes time
@@ -1309,22 +1646,33 @@ async function captureArea(rect) {
             return;
         }
 
+        console.log('[RENDERCAD Content] Sending captureScreen message to background...');
+        
+        // Show notification that render has started
+        chrome.runtime.sendMessage({
+            action: 'notify',
+            title: 'RENDERCAD - Render Started',
+            message: 'Your CAD image is being rendered. This may take 20-60 seconds.'
+        });
+        
         chrome.runtime.sendMessage({
             action: 'captureScreen',
             rect: rect,
             jobId: jobId,
+            renderMode: selectedRenderMode,
             viewportWidth: window.innerWidth,
             viewportHeight: window.innerHeight
         });
+        console.log('[RENDERCAD Content] captureScreen message sent');
     } catch (error) {
-        console.error('Error during capture:', error);
+        console.error('[RENDERCAD Content] Error during capture:', error);
         // Ensure modal is restored even on error
         if (loadingModalInstance && modalWasVisible) {
             loadingModalInstance.style.visibility = 'visible';
             loadingModalInstance.style.display = savedModalDisplay || 'flex';
             loadingModalInstance.style.opacity = '1';
         }
-        if (typeof jobId !== 'undefined') {
+        if (jobId) {
             hideLoadingOverlay(jobId);
         }
         showRenderError(error.message);
@@ -1374,15 +1722,19 @@ function showSignInPrompt() {
         font-family: 'Segoe UI', Arial, sans-serif;
         z-index: 2147483647;
         text-align: center;
-        min-width: 300px;
+        width: min(320px, calc(100vw - ${VIEWPORT_GUTTER * 2}px));
+        max-width: calc(100vw - ${VIEWPORT_GUTTER * 2}px);
+        box-sizing: border-box;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
     `;
     
     prompt.innerHTML = `
         <h3 style="margin: 0 0 15px 0; font-size: 18px;">Sign In Required</h3>
-        <p style="margin: 0 0 20px 0; font-size: 14px; opacity: 0.9;">Please sign in to use RenderCAD</p>
-        <button id="rendercad-signin-btn">Sign In</button>
-        <button id="rendercad-cancel-btn">Cancel</button>
+        <p style="margin: 0 0 20px 0; font-size: 14px; opacity: 0.9;">Please sign in to use RENDERCAD</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;">
+            <button id="rendercad-signin-btn">Sign In</button>
+            <button id="rendercad-cancel-btn">Cancel</button>
+        </div>
     `;
     
     document.body.appendChild(prompt);
@@ -1392,8 +1744,9 @@ function showSignInPrompt() {
     
     // Apply consistent button styles (matching createIconButton style)
     const buttonBaseStyle = {
-        background: 'linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05))',
-        border: '1px solid rgba(255, 255, 255, 0.5)',
+        background: 'linear-gradient(-75deg, rgba(255,255,255,0.08), rgba(255,255,255,0.2), rgba(255,255,255,0.08))',
+        backgroundColor: 'rgba(10, 14, 22, 0.9)',
+        border: '1px solid rgba(255, 255, 255, 0.65)',
         color: 'white',
         padding: '10px 20px',
         borderRadius: '4px',
@@ -1401,28 +1754,34 @@ function showSignInPrompt() {
         fontSize: '14px',
         fontWeight: '600',
         fontFamily: "'Segoe UI', Arial, sans-serif",
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        minWidth: '112px',
+        minHeight: '40px',
+        lineHeight: '1',
+        boxSizing: 'border-box',
         transition: 'all 0.2s ease',
         backdropFilter: 'blur(4px)',
         WebkitBackdropFilter: 'blur(4px)',
-        boxShadow: 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 4px rgba(0, 0, 0, 0.2)',
-        marginRight: '10px'
+        boxShadow: 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 4px rgba(0, 0, 0, 0.2)'
     };
     
     // Apply base styles to both buttons
     Object.assign(signInBtn.style, buttonBaseStyle);
-    const cancelBtnStyle = { ...buttonBaseStyle };
-    delete cancelBtnStyle.marginRight;
-    Object.assign(cancelBtn.style, cancelBtnStyle);
+    Object.assign(cancelBtn.style, buttonBaseStyle);
     
     // Add hover effects (matching createIconButton)
     signInBtn.addEventListener('mouseenter', () => {
         signInBtn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+        signInBtn.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
         signInBtn.style.borderColor = 'rgba(255, 255, 255, 0.7)';
         signInBtn.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
     });
     
     signInBtn.addEventListener('mouseleave', () => {
         signInBtn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05))';
+        signInBtn.style.backgroundColor = 'rgba(10, 14, 22, 0.9)';
         signInBtn.style.borderColor = 'rgba(255, 255, 255, 0.5)';
         signInBtn.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 4px rgba(0, 0, 0, 0.2)';
     });
@@ -1430,24 +1789,28 @@ function showSignInPrompt() {
     signInBtn.addEventListener('mousedown', (e) => {
         e.stopPropagation();
         signInBtn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.15), rgba(255,255,255,0.4), rgba(255,255,255,0.15))';
+        signInBtn.style.backgroundColor = 'rgba(22, 28, 40, 0.96)';
         signInBtn.style.boxShadow = 'inset 0 2px 2px rgba(0, 0, 0, 0.1), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4)';
         signInBtn.style.transform = 'scale(0.95)';
     });
     
     signInBtn.addEventListener('mouseup', () => {
         signInBtn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+        signInBtn.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
         signInBtn.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
         signInBtn.style.transform = 'scale(1)';
     });
     
     cancelBtn.addEventListener('mouseenter', () => {
         cancelBtn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+        cancelBtn.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
         cancelBtn.style.borderColor = 'rgba(255, 255, 255, 0.7)';
         cancelBtn.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
     });
     
     cancelBtn.addEventListener('mouseleave', () => {
         cancelBtn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05))';
+        cancelBtn.style.backgroundColor = 'rgba(10, 14, 22, 0.9)';
         cancelBtn.style.borderColor = 'rgba(255, 255, 255, 0.5)';
         cancelBtn.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 4px rgba(0, 0, 0, 0.2)';
     });
@@ -1455,12 +1818,14 @@ function showSignInPrompt() {
     cancelBtn.addEventListener('mousedown', (e) => {
         e.stopPropagation();
         cancelBtn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.15), rgba(255,255,255,0.4), rgba(255,255,255,0.15))';
+        cancelBtn.style.backgroundColor = 'rgba(22, 28, 40, 0.96)';
         cancelBtn.style.boxShadow = 'inset 0 2px 2px rgba(0, 0, 0, 0.1), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4)';
         cancelBtn.style.transform = 'scale(0.95)';
     });
     
     cancelBtn.addEventListener('mouseup', () => {
         cancelBtn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+        cancelBtn.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
         cancelBtn.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
         cancelBtn.style.transform = 'scale(1)';
     });
@@ -1490,7 +1855,7 @@ function showSignInPrompt() {
 
 // Function to close the render modal
 function closeRenderModal() {
-    console.log('[RenderCAD] closeRenderModal called');
+    console.log('[RENDERCAD] closeRenderModal called');
     if (loadingModalInstance) {
         // Clean up any animations or intervals
         if (typeof glowAnimationFrame !== 'undefined' && glowAnimationFrame) {
@@ -1499,10 +1864,11 @@ function closeRenderModal() {
         if (typeof tokenUpdateInterval !== 'undefined' && tokenUpdateInterval) {
             clearInterval(tokenUpdateInterval);
         }
+        hideFloatingMenus();
         // Hide the modal
         loadingModalInstance.style.display = 'none';
         loadingModalInstance.style.visibility = 'hidden';
-        console.log('[RenderCAD] Modal closed');
+        console.log('[RENDERCAD] Modal closed');
     }
 }
 
@@ -1519,23 +1885,23 @@ function isModalOpen() {
 
 // Function to open/show the render modal (now toggles if already open)
 function openRenderModal() {
-    console.log('[RenderCAD] openRenderModal called');
+    console.log('[RENDERCAD] openRenderModal called');
     
     // Check if modal is already open - if so, close it
     if (isModalOpen()) {
-        console.log('[RenderCAD] Modal is already open, closing it');
+        console.log('[RENDERCAD] Modal is already open, closing it');
         closeRenderModal();
         return;
     }
     
     if (!loadingModalInstance) {
-        console.log('[RenderCAD] Creating new modal instance');
+        console.log('[RENDERCAD] Creating new modal instance');
         loadingModalInstance = createLoadingModal();
     }
     
     // Ensure modal is visible
     if (loadingModalInstance) {
-        console.log('[RenderCAD] Showing modal');
+        console.log('[RENDERCAD] Showing modal');
         // Make sure modal is in the DOM
         if (!document.body.contains(loadingModalInstance)) {
             document.body.appendChild(loadingModalInstance);
@@ -1543,15 +1909,18 @@ function openRenderModal() {
         
         // Ensure modal is visible and positioned correctly
         loadingModalInstance.style.display = 'flex';
-        loadingModalInstance.style.right = '20px';
         loadingModalInstance.style.opacity = '1';
         loadingModalInstance.style.zIndex = '1000000';
         loadingModalInstance.style.visibility = 'visible';
+        if (!loadingModalInstance.hasAttribute('data-pinned')) {
+            applyUnpinnedModalWidth(loadingModalInstance);
+        }
+        setTimeout(() => clampModalToViewport(loadingModalInstance), 60);
         
         // Force a reflow to ensure styles are applied
         void loadingModalInstance.offsetHeight;
     } else {
-        console.error('[RenderCAD] Failed to create modal instance');
+        console.error('[RENDERCAD] Failed to create modal instance');
     }
 }
 
@@ -1592,7 +1961,7 @@ function createLoadingModal() {
     loadingModal.setAttribute('data-active-renders', '0');
     loadingModal.style.cssText = `
         position: fixed;
-        top: 20px;
+        top: ${VIEWPORT_GUTTER}px;
         right: -370px;
         background: rgba(0, 0, 0, 0.75);
         border: 2px solid rgba(255, 255, 255, 0.3);
@@ -1608,10 +1977,10 @@ function createLoadingModal() {
         display: flex;
         flex-direction: column;
         gap: 0;
-        width: 320px;
+        width: ${getResponsiveModalWidthCss()};
         height: auto;
         min-height: 60px;
-        max-height: 90vh;
+        max-height: calc(100vh - ${VIEWPORT_GUTTER * 2}px);
         user-select: none;
         opacity: 0;
         transition: right 0.5s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.5s ease;
@@ -1619,7 +1988,7 @@ function createLoadingModal() {
 
     // Trigger animation after a brief delay
     setTimeout(() => {
-        loadingModal.style.right = '20px';
+        loadingModal.style.right = VIEWPORT_GUTTER + 'px';
         loadingModal.style.opacity = '1';
     }, 50);
 
@@ -1669,7 +2038,7 @@ function createLoadingModal() {
 
     const logo = document.createElement('img');
     logo.src = chrome.runtime.getURL('icons/logo.svg');
-    logo.alt = 'RenderCAD';
+    logo.alt = 'RENDERCAD';
     logo.style.cssText = `
         width: 40.128px;
         height: 33.44px;
@@ -1722,7 +2091,7 @@ function createLoadingModal() {
         position: relative;
     `;
     
-    const title = document.createTextNode('RenderCAD');
+    const title = document.createTextNode('RENDERCAD');
     const titleTm = document.createElement('sup');
     titleTm.className = 'tm';
     titleTm.textContent = '™';
@@ -1753,8 +2122,9 @@ function createLoadingModal() {
         btn.style.cssText = `
         position: absolute;
         top: 6px;
-            background: linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05));
-        border: 1px solid rgba(255, 255, 255, 0.5);
+            background: linear-gradient(-75deg, rgba(255,255,255,0.08), rgba(255,255,255,0.2), rgba(255,255,255,0.08));
+            background-color: rgba(10, 14, 22, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.65);
         color: white;
             width: 24px;
             height: 24px;
@@ -1777,13 +2147,15 @@ function createLoadingModal() {
         `;
 
         btn.addEventListener('mouseenter', () => {
-            btn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+            btn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.12), rgba(255,255,255,0.3), rgba(255,255,255,0.12))';
+            btn.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
             btn.style.borderColor = 'rgba(255, 255, 255, 0.7)';
             btn.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
         });
 
         btn.addEventListener('mouseleave', () => {
-            btn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05))';
+            btn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.08), rgba(255,255,255,0.2), rgba(255,255,255,0.08))';
+            btn.style.backgroundColor = 'rgba(10, 14, 22, 0.9)';
             btn.style.borderColor = 'rgba(255, 255, 255, 0.5)';
             btn.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 4px rgba(0, 0, 0, 0.2)';
         });
@@ -1791,14 +2163,16 @@ function createLoadingModal() {
         btn.addEventListener('mousedown', (e) => {
             e.stopPropagation();
             btn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.15), rgba(255,255,255,0.4), rgba(255,255,255,0.15))';
+            btn.style.backgroundColor = 'rgba(22, 28, 40, 0.96)';
             btn.style.boxShadow = 'inset 0 2px 2px rgba(0, 0, 0, 0.1), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4)';
-            btn.style.transform = 'scale(0.95)';
+            setHeaderButtonTransform(btn, 0.95);
         });
 
         btn.addEventListener('mouseup', () => {
-            btn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+            btn.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.12), rgba(255,255,255,0.3), rgba(255,255,255,0.12))';
+            btn.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
             btn.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
-            btn.style.transform = 'scale(1)';
+            setHeaderButtonTransform(btn, 1);
         });
 
         btn.addEventListener('click', (e) => {
@@ -1819,8 +2193,9 @@ function createLoadingModal() {
         position: absolute;
         top: 6px;
         right: 8px;
-        background: linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05));
-        border: 1px solid rgba(255, 255, 255, 0.5);
+        background: linear-gradient(-75deg, rgba(255,255,255,0.08), rgba(255,255,255,0.2), rgba(255,255,255,0.08));
+        background-color: rgba(10, 14, 22, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.65);
         color: white;
         width: 24px;
         height: 24px;
@@ -1843,13 +2218,15 @@ function createLoadingModal() {
     `;
 
     hamburgerButton.addEventListener('mouseenter', () => {
-        hamburgerButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+        hamburgerButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.12), rgba(255,255,255,0.3), rgba(255,255,255,0.12))';
+        hamburgerButton.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
         hamburgerButton.style.borderColor = 'rgba(255, 255, 255, 0.7)';
         hamburgerButton.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
     });
 
     hamburgerButton.addEventListener('mouseleave', () => {
-        hamburgerButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05))';
+        hamburgerButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.08), rgba(255,255,255,0.2), rgba(255,255,255,0.08))';
+        hamburgerButton.style.backgroundColor = 'rgba(10, 14, 22, 0.9)';
         hamburgerButton.style.borderColor = 'rgba(255, 255, 255, 0.5)';
         hamburgerButton.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 4px rgba(0, 0, 0, 0.2)';
     });
@@ -1857,14 +2234,16 @@ function createLoadingModal() {
     hamburgerButton.addEventListener('mousedown', (e) => {
         e.stopPropagation();
         hamburgerButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.15), rgba(255,255,255,0.4), rgba(255,255,255,0.15))';
+        hamburgerButton.style.backgroundColor = 'rgba(22, 28, 40, 0.96)';
         hamburgerButton.style.boxShadow = 'inset 0 2px 2px rgba(0, 0, 0, 0.1), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4)';
-        hamburgerButton.style.transform = 'scale(0.95)';
+        setHeaderButtonTransform(hamburgerButton, 0.95);
     });
 
     hamburgerButton.addEventListener('mouseup', () => {
-        hamburgerButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+        hamburgerButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.12), rgba(255,255,255,0.3), rgba(255,255,255,0.12))';
+        hamburgerButton.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
         hamburgerButton.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
-        hamburgerButton.style.transform = 'scale(1)';
+        setHeaderButtonTransform(hamburgerButton, 1);
     });
 
     // Function to update hamburger menu with current auth state
@@ -1894,7 +2273,7 @@ function createLoadingModal() {
         
         // Build menu items based on auth state
         const menuItems = [
-            { text: 'Render Studio', icon: 'fa-palette', url: 'https://rendercad.ai/render' },
+            { text: 'Render Studio', icon: 'fa-palette', action: () => { if (chrome.runtime?.id) chrome.runtime.sendMessage({ action: 'openStudio' }); } },
             { text: 'History', icon: 'fa-history', url: 'https://rendercad.ai/history' },
             { text: 'Settings', icon: 'fa-user-cog', url: 'https://rendercad.ai/settings' },
             { text: 'Pin', icon: 'fa-thumbtack', action: () => {
@@ -1949,6 +2328,7 @@ function createLoadingModal() {
                 if (typeof tokenUpdateInterval !== 'undefined' && tokenUpdateInterval) {
                     clearInterval(tokenUpdateInterval);
                 }
+                hideFloatingMenus();
                 loadingModal.remove();
                 loadingModalInstance = null;
                 renderedImages = [];
@@ -2003,7 +2383,7 @@ function createLoadingModal() {
         const dropdown = await updateHamburgerMenu();
         
         if (!dropdown) {
-            console.error('[RenderCAD] Failed to create dropdown');
+            console.error('[RENDERCAD] Failed to create dropdown');
             return;
         }
         
@@ -2016,9 +2396,7 @@ function createLoadingModal() {
             ensurePreviewContainerScrollable();
         } else {
             const buttonRect = hamburgerButton.getBoundingClientRect();
-            dropdown.style.top = (buttonRect.bottom + 2) + 'px';
-            dropdown.style.right = (window.innerWidth - buttonRect.right) + 'px';
-            dropdown.style.display = 'block';
+            positionFloatingDropdown(dropdown, buttonRect);
             
             // Close dropdown when clicking outside
             const closeDropdown = (e) => {
@@ -2037,7 +2415,7 @@ function createLoadingModal() {
 
     // Keep old button references for backward compatibility but hide them
     const renderStudioButton = createIconButton('fas fa-palette', () => {
-        window.open('https://rendercad.ai/render', '_blank');
+        if (chrome.runtime?.id) chrome.runtime.sendMessage({ action: 'openStudio' });
     }, 'Render Studio');
     renderStudioButton.style.display = 'none';
 
@@ -2147,29 +2525,27 @@ function createLoadingModal() {
         // STEP 2: Apply the correct state
         if (isPinned) {
             modal.setAttribute('data-pinned', 'true');
-            modal.style.setProperty('width', '60px', 'important');
-            modal.style.setProperty('min-width', '60px', 'important');
-            modal.style.setProperty('max-width', '60px', 'important');
+            modal.style.setProperty('width', `${PINNED_MODAL_WIDTH}px`, 'important');
+            modal.style.setProperty('min-width', `${PINNED_MODAL_WIDTH}px`, 'important');
+            modal.style.setProperty('max-width', `${PINNED_MODAL_WIDTH}px`, 'important');
             modal.style.setProperty('padding', '0', 'important');
 
             if (isExpanded) {
                 modal.style.setProperty('height', 'auto', 'important');
-                modal.style.setProperty('min-height', '60px', 'important');
+                modal.style.setProperty('min-height', `${PINNED_MODAL_WIDTH}px`, 'important');
                 modal.style.setProperty('max-height', 'none', 'important');
             } else {
-                modal.style.setProperty('height', '60px', 'important');
-                modal.style.setProperty('min-height', '60px', 'important');
-                modal.style.setProperty('max-height', '60px', 'important');
+                modal.style.setProperty('height', `${PINNED_MODAL_WIDTH}px`, 'important');
+                modal.style.setProperty('min-height', `${PINNED_MODAL_WIDTH}px`, 'important');
+                modal.style.setProperty('max-height', `${PINNED_MODAL_WIDTH}px`, 'important');
             }
         } else {
             modal.removeAttribute('data-pinned');
-            modal.style.setProperty('width', '320px', 'important');
-            modal.style.setProperty('min-width', '320px', 'important');
-            modal.style.setProperty('max-width', '320px', 'important');
+            applyUnpinnedModalWidth(modal);
             modal.style.setProperty('height', 'auto', 'important');
             modal.style.setProperty('min-height', '60px', 'important');
             // Set max-height to viewport height to allow preview container to scroll
-            modal.style.setProperty('max-height', '90vh', 'important');
+            modal.style.setProperty('max-height', `calc(100vh - ${VIEWPORT_GUTTER * 2}px)`, 'important');
         }
 
         void modal.offsetHeight; // Force reflow
@@ -2265,7 +2641,11 @@ function createLoadingModal() {
             applyModalState(loadingModal, true, isExpanded);
 
             // Position modal (keep right edge in same place)
-            const newLeft = Math.max(20, Math.min(rightEdge - 60, window.innerWidth - 80));
+            const newLeft = clampValue(
+                rightEdge - PINNED_MODAL_WIDTH,
+                VIEWPORT_GUTTER,
+                Math.max(VIEWPORT_GUTTER, window.innerWidth - PINNED_MODAL_WIDTH - VIEWPORT_GUTTER)
+            );
             loadingModal.style.left = newLeft + 'px';
             loadingModal.style.right = 'auto';
 
@@ -2289,7 +2669,7 @@ function createLoadingModal() {
                 logoButton.className = 'rendercad-logo-button';
                 const logoImg = document.createElement('img');
                 logoImg.src = chrome.runtime.getURL('icons/logo.svg');
-                logoImg.alt = 'RenderCAD';
+                logoImg.alt = 'RENDERCAD';
                 logoImg.style.cssText = `
                     width: 26px;
                     height: 26px;
@@ -2373,7 +2753,7 @@ function createLoadingModal() {
             }
             logoButton.style.display = 'flex';
             // Logo button is already positioned absolutely with fixed top: 8px and centered horizontally
-            // Hide RenderCAD text and header content
+            // Hide RENDERCAD text and header content
             headerContent.style.display = 'none';
             hamburgerButton.style.display = 'none';
             tokenIndicator.style.display = 'none';
@@ -2397,8 +2777,8 @@ function createLoadingModal() {
                 cornerOptionsButton.className = 'rendercad-corner-options-button';
                 cornerOptionsButton.style.cssText = `
                     position: absolute;
-                    top: 0;
-                    right: 0;
+                    top: 2px;
+                    right: 2px;
                     width: 16px;
                     height: 16px;
                     background: linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.25), rgba(255,255,255,0.1));
@@ -2438,7 +2818,7 @@ function createLoadingModal() {
                             async function buildPinnedMenuItems() {
                                 const isAuthenticated = await checkAuthentication();
                                 const menuItems = [
-                                    { text: 'Render Studio', icon: 'fa-palette', url: 'https://rendercad.ai/render' },
+                                    { text: 'Render Studio', icon: 'fa-palette', action: () => { if (chrome.runtime?.id) chrome.runtime.sendMessage({ action: 'openStudio' }); } },
                                     { text: 'History', icon: 'fa-history', url: 'https://rendercad.ai/history' },
                                     { text: 'Settings', icon: 'fa-user-cog', url: 'https://rendercad.ai/settings' },
                                     { text: 'Unpin', icon: 'fa-thumbtack', action: () => { 
@@ -2563,6 +2943,7 @@ function createLoadingModal() {
                                         if (typeof tokenUpdateInterval !== 'undefined' && tokenUpdateInterval) {
                                             clearInterval(tokenUpdateInterval);
                                         }
+                                        hideFloatingMenus();
                                         loadingModal.remove();
                                         loadingModalInstance = null;
                                         renderedImages = [];
@@ -2626,9 +3007,7 @@ function createLoadingModal() {
                         }
                         // Position dropdown relative to button (fixed positioning)
                         const buttonRect = cornerOptionsButton.getBoundingClientRect();
-                        dropdown.style.top = (buttonRect.bottom + 2) + 'px';
-                        dropdown.style.right = (window.innerWidth - buttonRect.right) + 'px';
-                        dropdown.style.display = 'block';
+                        positionFloatingDropdown(dropdown, buttonRect);
                     }
                 });
                 cornerOptionsButton.addEventListener('mouseenter', () => {
@@ -2650,8 +3029,8 @@ function createLoadingModal() {
                 cornerToggleButton.className = 'rendercad-corner-toggle-button';
                 cornerToggleButton.style.cssText = `
                     position: absolute;
-                    bottom: 0;
-                    left: 0;
+                    bottom: 2px;
+                    left: 2px;
                     width: 16px;
                     height: 16px;
                     background: linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.25), rgba(255,255,255,0.1));
@@ -2764,12 +3143,12 @@ function createLoadingModal() {
 
             // ROBUST PINNING: Force size constraints immediately, then set attribute
             // Step 1: Set inline styles with !important to force 60x60
-            loadingModal.style.setProperty('width', '60px', 'important');
-            loadingModal.style.setProperty('min-width', '60px', 'important');
-            loadingModal.style.setProperty('max-width', '60px', 'important');
-            loadingModal.style.setProperty('height', '60px', 'important');
-            loadingModal.style.setProperty('min-height', '60px', 'important');
-            loadingModal.style.setProperty('max-height', '60px', 'important');
+            loadingModal.style.setProperty('width', `${PINNED_MODAL_WIDTH}px`, 'important');
+            loadingModal.style.setProperty('min-width', `${PINNED_MODAL_WIDTH}px`, 'important');
+            loadingModal.style.setProperty('max-width', `${PINNED_MODAL_WIDTH}px`, 'important');
+            loadingModal.style.setProperty('height', `${PINNED_MODAL_WIDTH}px`, 'important');
+            loadingModal.style.setProperty('min-height', `${PINNED_MODAL_WIDTH}px`, 'important');
+            loadingModal.style.setProperty('max-height', `${PINNED_MODAL_WIDTH}px`, 'important');
             loadingModal.style.setProperty('padding', '0', 'important');
 
             // Force reflow
@@ -2811,25 +3190,29 @@ function createLoadingModal() {
             // Force a reflow to ensure styles are applied before positioning
             void loadingModal.offsetHeight;
 
+            const unpinnedRect = loadingModal.getBoundingClientRect();
+
             // Position modal (keep right edge in same place)
-            const newLeft = Math.max(20, Math.min(rightEdge - 320, window.innerWidth - 340));
+            const newLeft = clampValue(
+                rightEdge - unpinnedRect.width,
+                VIEWPORT_GUTTER,
+                Math.max(VIEWPORT_GUTTER, window.innerWidth - unpinnedRect.width - VIEWPORT_GUTTER)
+            );
             loadingModal.style.left = newLeft + 'px';
             loadingModal.style.right = 'auto';
             
             // Ensure modal has correct dimensions after unpinning
-            loadingModal.style.setProperty('width', '320px', 'important');
-            loadingModal.style.setProperty('min-width', '320px', 'important');
-            loadingModal.style.setProperty('max-width', '320px', 'important');
+            applyUnpinnedModalWidth(loadingModal);
             loadingModal.style.setProperty('height', 'auto', 'important');
             loadingModal.style.setProperty('min-height', '60px', 'important');
             // Set max-height to viewport height to allow preview container to scroll
-            loadingModal.style.setProperty('max-height', '90vh', 'important');
+            loadingModal.style.setProperty('max-height', `calc(100vh - ${VIEWPORT_GUTTER * 2}px)`, 'important');
 
             // Show camera button, hide logo button
             cameraButton.style.display = 'flex';
             const logoButton = loadingModal.querySelector('.rendercad-logo-button');
             if (logoButton) logoButton.style.display = 'none';
-            // Show RenderCAD text and header content
+            // Show RENDERCAD text and header content
             headerContent.style.display = 'flex';
             hamburgerButton.style.display = 'flex';
             tokenIndicator.style.display = '';
@@ -2870,7 +3253,7 @@ function createLoadingModal() {
             if (cornerOptionsButton) cornerOptionsButton.style.display = 'none';
             const cornerToggleButton = loadingModal.querySelector('.rendercad-corner-toggle-button');
             if (cornerToggleButton) cornerToggleButton.style.display = 'none';
-            const dropdown = loadingModal.querySelector('.rendercad-options-dropdown');
+            const dropdown = document.querySelector('.rendercad-options-dropdown');
             if (dropdown) dropdown.style.display = 'none';
 
             // Update download button to show full text
@@ -2887,7 +3270,7 @@ function createLoadingModal() {
         }
     }, 'Pin/Unpin');
     pinButton.style.right = '34px';
-    pinButton.style.top = '2px';
+    pinButton.style.top = '6px';
     pinButton.style.display = 'none'; // Hidden by default (unpinned state)
 
     // Close button (using times icon to match style)
@@ -2899,6 +3282,7 @@ function createLoadingModal() {
             if (typeof tokenUpdateInterval !== 'undefined' && tokenUpdateInterval) {
                 clearInterval(tokenUpdateInterval);
             }
+            hideFloatingMenus();
             loadingModal.remove();
             loadingModalInstance = null;
             renderedImages = []; // Clear stored images
@@ -2906,7 +3290,7 @@ function createLoadingModal() {
         }
     }, 'Close');
     closeButton.style.right = '8px';
-    closeButton.style.top = '2px';
+    closeButton.style.top = '6px';
     closeButton.style.display = 'none'; // Hidden by default (unpinned state, using hamburger menu instead)
 
     header.appendChild(headerContent);
@@ -3048,16 +3432,17 @@ function createLoadingModal() {
     cameraButton.title = 'Take New Screenshot';
     cameraButton.style.cssText = `
         position: absolute;
-        top: 12px;
+        top: 6px;
         left: 0;
-        width: 32px;
-        height: 32px;
-        background: linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05));
-        border: 1px solid rgba(255, 255, 255, 0.5);
-        border-radius: 0 6px 6px 0;
+        width: 24px;
+        height: 24px;
+        background: linear-gradient(-75deg, rgba(255,255,255,0.08), rgba(255,255,255,0.2), rgba(255,255,255,0.08));
+        background-color: rgba(10, 14, 22, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.65);
+        border-radius: 0 4px 4px 0;
         color: white;
         cursor: pointer;
-        font-size: 14px;
+        font-size: 12px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -3074,13 +3459,15 @@ function createLoadingModal() {
     `;
 
     cameraButton.addEventListener('mouseenter', () => {
-        cameraButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+        cameraButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.12), rgba(255,255,255,0.3), rgba(255,255,255,0.12))';
+        cameraButton.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
         cameraButton.style.borderColor = 'rgba(255, 255, 255, 0.7)';
         cameraButton.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
     });
 
     cameraButton.addEventListener('mouseleave', () => {
-        cameraButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05))';
+        cameraButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.08), rgba(255,255,255,0.2), rgba(255,255,255,0.08))';
+        cameraButton.style.backgroundColor = 'rgba(10, 14, 22, 0.9)';
         cameraButton.style.borderColor = 'rgba(255, 255, 255, 0.5)';
         cameraButton.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 4px rgba(0, 0, 0, 0.2)';
     });
@@ -3088,14 +3475,16 @@ function createLoadingModal() {
     cameraButton.addEventListener('mousedown', (e) => {
         e.stopPropagation();
         cameraButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.15), rgba(255,255,255,0.4), rgba(255,255,255,0.15))';
+        cameraButton.style.backgroundColor = 'rgba(22, 28, 40, 0.96)';
         cameraButton.style.boxShadow = 'inset 0 2px 2px rgba(0, 0, 0, 0.1), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4)';
-        cameraButton.style.transform = 'scale(0.95)';
+        setHeaderButtonTransform(cameraButton, 0.95);
     });
 
     cameraButton.addEventListener('mouseup', () => {
-        cameraButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1))';
+        cameraButton.style.background = 'linear-gradient(-75deg, rgba(255,255,255,0.12), rgba(255,255,255,0.3), rgba(255,255,255,0.12))';
+        cameraButton.style.backgroundColor = 'rgba(18, 24, 34, 0.94)';
         cameraButton.style.boxShadow = 'inset 0 1px 1px rgba(0, 0, 0, 0.05), inset 0 -1px 1px rgba(255, 255, 255, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)';
-        cameraButton.style.transform = 'scale(1)';
+        setHeaderButtonTransform(cameraButton, 1);
     });
 
     cameraButton.addEventListener('click', async (e) => {
@@ -3163,6 +3552,7 @@ function createLoadingModal() {
 
         // Apply the new expand/collapse state
         applyModalState(loadingModal, isPinned, isExpanded);
+        clampModalToViewport(loadingModal);
 
         // Update toggle icon
         toggleIcon.textContent = isExpanded ? '▲' : '▼';
@@ -3245,8 +3635,22 @@ function createLoadingModal() {
         const queueCounterEl = document.querySelector('.rendercad-queue-counter');
         if (!queueCounterEl) return;
         const modalRect = loadingModal.getBoundingClientRect();
-        queueCounterEl.style.left = (modalRect.left - 12) + 'px';
-        queueCounterEl.style.top = (modalRect.top - 5) + 'px';
+
+        const queueWidth = queueCounterEl.offsetWidth || 24;
+        const queueHeight = queueCounterEl.offsetHeight || 24;
+        const queueLeft = clampValue(
+            modalRect.left - 12,
+            VIEWPORT_GUTTER,
+            Math.max(VIEWPORT_GUTTER, window.innerWidth - queueWidth - VIEWPORT_GUTTER)
+        );
+        const queueTop = clampValue(
+            modalRect.top - 5,
+            VIEWPORT_GUTTER,
+            Math.max(VIEWPORT_GUTTER, window.innerHeight - queueHeight - VIEWPORT_GUTTER)
+        );
+
+        queueCounterEl.style.left = queueLeft + 'px';
+        queueCounterEl.style.top = queueTop + 'px';
         
         // Update dropdown positions to move with modal
         const pinnedDropdown = document.querySelector('.rendercad-options-dropdown');
@@ -3257,8 +3661,7 @@ function createLoadingModal() {
             const cornerOptionsButton = loadingModal.querySelector('.rendercad-corner-options-button');
             if (cornerOptionsButton) {
                 const buttonRect = cornerOptionsButton.getBoundingClientRect();
-                pinnedDropdown.style.top = (buttonRect.bottom + 2) + 'px';
-                pinnedDropdown.style.right = (window.innerWidth - buttonRect.right) + 'px';
+                positionFloatingDropdown(pinnedDropdown, buttonRect);
             }
         }
         
@@ -3267,8 +3670,7 @@ function createLoadingModal() {
             const hamburgerButton = loadingModal.querySelector('.rendercad-hamburger-button');
             if (hamburgerButton) {
                 const buttonRect = hamburgerButton.getBoundingClientRect();
-                unpinnedDropdown.style.top = (buttonRect.bottom + 2) + 'px';
-                unpinnedDropdown.style.right = (window.innerWidth - buttonRect.right) + 'px';
+                positionFloatingDropdown(unpinnedDropdown, buttonRect);
             }
         }
     }
@@ -3291,7 +3693,7 @@ function createLoadingModal() {
     
     // Ensure modal has proper height constraints from the start (unpinned mode)
     // This is critical for the preview container to scroll properly
-    loadingModal.style.setProperty('max-height', '90vh', 'important');
+    loadingModal.style.setProperty('max-height', `calc(100vh - ${VIEWPORT_GUTTER * 2}px)`, 'important');
     loadingModal.style.setProperty('height', 'auto', 'important');
     loadingModal.style.setProperty('min-height', '60px', 'important');
     
@@ -3302,7 +3704,14 @@ function createLoadingModal() {
         updateQueueCounterPosition();
     }, 550); // Slightly longer than the 0.5s transition
     
-    window.addEventListener('resize', updateQueueCounterPosition);
+    window.addEventListener('resize', () => {
+        if (!loadingModal || !document.body.contains(loadingModal)) return;
+        if (!loadingModal.hasAttribute('data-pinned')) {
+            applyUnpinnedModalWidth(loadingModal);
+        }
+        clampModalToViewport(loadingModal);
+        updateQueueCounterPosition();
+    });
 
     // Add drag functionality - make modal draggable from header and background
     // Pass header as handle for drag start, but allow dragging from entire modal
@@ -3380,19 +3789,19 @@ function makeDraggable(modal, handle, updateQueueCounterPositionFn) {
         let lockWidth, lockHeight, lockMaxHeight;
         if (isPinned && !hasVisibleImages) {
             // Pinned and collapsed - always 60x60 square
-            lockWidth = '60px';
-            lockHeight = '60px';
-            lockMaxHeight = '60px';
+            lockWidth = `${PINNED_MODAL_WIDTH}px`;
+            lockHeight = `${PINNED_MODAL_WIDTH}px`;
+            lockMaxHeight = `${PINNED_MODAL_WIDTH}px`;
         } else if (isPinned && hasVisibleImages) {
             // Pinned but with images - fixed 60px width, allow height to grow
-            lockWidth = '60px';
+            lockWidth = `${PINNED_MODAL_WIDTH}px`;
             const rect = modal.getBoundingClientRect();
             lockHeight = `${rect.height}px`;
             lockMaxHeight = `${rect.height}px`;
         } else {
-            // Unpinned - standard 400px width
+            // Unpinned - lock current responsive width during drag
             const rect = modal.getBoundingClientRect();
-            lockWidth = '320px'; // Hardcoded instead of rect.width to prevent drift
+            lockWidth = `${rect.width}px`;
             lockHeight = `${rect.height}px`;
             lockMaxHeight = `${rect.height}px`;
         }
@@ -3424,7 +3833,7 @@ function makeDraggable(modal, handle, updateQueueCounterPositionFn) {
                 height: ${lockHeight} !important;
                 min-width: ${lockWidth} !important;
                 max-width: ${lockWidth} !important;
-                min-height: ${isPinned ? '60px' : lockHeight} !important;
+                min-height: ${isPinned ? `${PINNED_MODAL_WIDTH}px` : lockHeight} !important;
                 max-height: ${lockMaxHeight} !important;
                 flex-shrink: 0 !important;
                 flex-grow: 0 !important;
@@ -3472,11 +3881,6 @@ function makeDraggable(modal, handle, updateQueueCounterPositionFn) {
         let newLeft = startModalLeft + deltaX;
         let newTop = startModalTop + deltaY;
         
-        // Update queue counter position if function provided
-        if (updateQueueCounterPositionFn && typeof updateQueueCounterPositionFn === 'function') {
-            updateQueueCounterPositionFn();
-        }
-        
         // Ensure preview container maintains scroll constraints DURING drag (unpinned mode only)
         const previewContainer = modal.querySelector('.rendercad-preview-container');
         if (previewContainer && !modal.hasAttribute('data-pinned')) {
@@ -3493,11 +3897,11 @@ function makeDraggable(modal, handle, updateQueueCounterPositionFn) {
         const windowWidth = window.innerWidth;
         const windowHeight = window.innerHeight;
 
-        // Boundaries - allow modal to go to edge (no padding)
-        const minLeft = 0;
-        const maxLeft = windowWidth - modalRect.width;
-        const minTop = 0;
-        const maxTop = windowHeight - modalRect.height;
+        // Boundaries - preserve a viewport gutter so controls do not clip.
+        const minLeft = VIEWPORT_GUTTER;
+        const maxLeft = Math.max(VIEWPORT_GUTTER, windowWidth - modalRect.width - VIEWPORT_GUTTER);
+        const minTop = VIEWPORT_GUTTER;
+        const maxTop = Math.max(VIEWPORT_GUTTER, windowHeight - modalRect.height - VIEWPORT_GUTTER);
 
         // Constrain to boundaries
         newLeft = Math.max(minLeft, Math.min(newLeft, maxLeft));
@@ -3505,7 +3909,7 @@ function makeDraggable(modal, handle, updateQueueCounterPositionFn) {
 
         // Snap to edges (closer threshold)
         const snapThreshold = 20;
-        const snapMargin = 0; // No margin when snapped
+        const snapMargin = VIEWPORT_GUTTER;
 
         // Snap to right edge
         if (windowWidth - (newLeft + modalRect.width) < snapThreshold) {
@@ -3531,6 +3935,10 @@ function makeDraggable(modal, handle, updateQueueCounterPositionFn) {
         modal.style.top = newTop + 'px';
         modal.style.right = 'auto';
         modal.style.bottom = 'auto';
+
+        if (updateQueueCounterPositionFn && typeof updateQueueCounterPositionFn === 'function') {
+            updateQueueCounterPositionFn();
+        }
     }
 
     function dragEnd(e) {
@@ -3579,16 +3987,19 @@ function makeDraggable(modal, handle, updateQueueCounterPositionFn) {
         const rectBefore = modal.getBoundingClientRect();
         if (isPinned) {
             // Ensure pinned width is maintained
-            modal.style.setProperty('width', '60px', 'important');
-            modal.style.setProperty('min-width', '60px', 'important');
-            modal.style.setProperty('max-width', '60px', 'important');
+            modal.style.setProperty('width', `${PINNED_MODAL_WIDTH}px`, 'important');
+            modal.style.setProperty('min-width', `${PINNED_MODAL_WIDTH}px`, 'important');
+            modal.style.setProperty('max-width', `${PINNED_MODAL_WIDTH}px`, 'important');
         } else {
             // Ensure normal width is maintained
-            modal.style.setProperty('width', '320px', 'important');
-            modal.style.removeProperty('min-width');
-            modal.style.removeProperty('max-width');
+            applyUnpinnedModalWidth(modal);
         }
         const rectAfter = modal.getBoundingClientRect();
+
+        clampModalToViewport(modal);
+        if (updateQueueCounterPositionFn && typeof updateQueueCounterPositionFn === 'function') {
+            updateQueueCounterPositionFn();
+        }
         
         modal.style.cursor = 'move';
     }
@@ -3892,12 +4303,10 @@ function updateQueueCounter() {
     if (activeRenders > 1) {
         queueCounter.style.display = 'flex';
         queueCounter.textContent = activeRenders.toString();
-        // Update position relative to modal's top-left corner
-        // Use requestAnimationFrame to ensure modal is fully rendered
         requestAnimationFrame(() => {
-            const modalRect = loadingModalInstance.getBoundingClientRect();
-            queueCounter.style.left = (modalRect.left - 12) + 'px';
-            queueCounter.style.top = (modalRect.top - 5) + 'px';
+            if (window.updateQueueCounterPosition) {
+                window.updateQueueCounterPosition();
+            }
         });
     } else {
         queueCounter.style.display = 'none';
@@ -3915,7 +4324,7 @@ function ensurePreviewContainerScrollable() {
     if (!previewContainer) return;
     
     // Ensure modal has proper height constraints
-    loadingModalInstance.style.setProperty('max-height', '90vh', 'important');
+    loadingModalInstance.style.setProperty('max-height', `calc(100vh - ${VIEWPORT_GUTTER * 2}px)`, 'important');
     loadingModalInstance.style.setProperty('height', 'auto', 'important');
     
     // Ensure content wrapper doesn't prevent scrolling
@@ -3942,25 +4351,49 @@ function ensurePreviewContainerScrollable() {
         void previewContainer.offsetHeight;
         void previewContainer.scrollHeight;
         void previewContainer.clientHeight;
+        clampModalToViewport(loadingModalInstance);
     });
 }
 
+async function downloadImageSource(imageUrl, filename) {
+    const link = document.createElement('a');
+
+    if (/^https?:/i.test(imageUrl)) {
+        const response = await fetch(imageUrl, { mode: 'cors' });
+        if (!response.ok) {
+            throw new Error(`Download failed: ${response.status}`);
+        }
+
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        link.download = filename;
+        link.href = objectUrl;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+        return;
+    }
+
+    link.download = filename;
+    link.href = imageUrl;
+    link.click();
+}
+
 function displayRenderedImage(originalImage, renderedImage, rect, jobId) {
-    console.log('[RenderCAD Content] displayRenderedImage called', {
+    console.log('[RENDERCAD Content] displayRenderedImage called', {
         hasLoadingModal: !!loadingModalInstance,
         imageSize: renderedImage?.length,
         jobId
     });
 
     if (!loadingModalInstance) {
-        console.error('[RenderCAD Content] No loading modal instance!');
+        console.error('[RENDERCAD Content] No loading modal instance!');
         return;
     }
 
     // Get the preview container
     const previewContainer = loadingModalInstance.querySelector('.rendercad-preview-container');
     if (!previewContainer) {
-        console.error('[RenderCAD Content] No preview container found!');
+        console.error('[RENDERCAD Content] No preview container found!');
         return;
     }
 
@@ -3993,7 +4426,7 @@ function displayRenderedImage(originalImage, renderedImage, rect, jobId) {
         
         // Ensure modal has proper height constraints in unpinned mode for scrolling
         if (!isPinned) {
-            loadingModalInstance.style.setProperty('max-height', '90vh', 'important');
+            loadingModalInstance.style.setProperty('max-height', `calc(100vh - ${VIEWPORT_GUTTER * 2}px)`, 'important');
             loadingModalInstance.style.setProperty('height', 'auto', 'important');
             // Immediately ensure scrollbar appears
             ensurePreviewContainerScrollable();
@@ -4139,11 +4572,12 @@ function displayRenderedImage(originalImage, renderedImage, rect, jobId) {
     }
 
     // Download button
-    const downloadBtn = createActionButton('fas fa-download', () => {
-        const link = document.createElement('a');
-        link.download = `rendercad-render-${Date.now()}.png`;
-        link.href = renderedImage;
-        link.click();
+    const downloadBtn = createActionButton('fas fa-download', async () => {
+        try {
+            await downloadImageSource(renderedImage, `rendercad-render-${Date.now()}.png`);
+        } catch (error) {
+            showRenderError(error.message);
+        }
     }, 'Download');
 
     // Toggle button (if we have original image stored)
@@ -4158,7 +4592,7 @@ function displayRenderedImage(originalImage, renderedImage, rect, jobId) {
     }
 
     // Re-render button
-    const redoBtn = createActionButton('fas fa-redo', () => {
+    const redoBtn = createActionButton('fas fa-redo', async () => {
         // Check if extension context is still valid
         if (!chrome.runtime?.id) {
             console.error('Extension context invalidated - please refresh the page');
@@ -4179,12 +4613,15 @@ function displayRenderedImage(originalImage, renderedImage, rect, jobId) {
             return;
         }
 
+        const renderMode = await getStoredRenderModePreference();
+
         // Send the original image to be re-rendered (not a new capture)
         chrome.runtime.sendMessage({
             action: 'rerenderImage',
             imageData: originalImageForRerender,
             rect: rect,
-            jobId: showLoadingOverlay()
+            jobId: showLoadingOverlay(),
+            renderMode: renderMode
         });
     }, 'Re-render');
 
@@ -4812,15 +5249,16 @@ function showFullscreenImage(imageIndex) {
             transition: all 0.2s ease;
         `;
 
-    downloadBtn.addEventListener('click', (e) => {
+    downloadBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         // Use current index to get the correct image
         const currentRenderedImage = renderedImages[currentFullscreenIndex];
         if (currentRenderedImage) {
-            const link = document.createElement('a');
-            link.download = `rendercad-render-${Date.now()}.png`;
-            link.href = currentRenderedImage;
-            link.click();
+            try {
+                await downloadImageSource(currentRenderedImage, `rendercad-render-${Date.now()}.png`);
+            } catch (error) {
+                showRenderError(error.message);
+            }
         }
     });
 

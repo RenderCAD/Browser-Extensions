@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RENDERCAD Pinned Modal Test</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        body {
+            margin: 0;
+            padding: 40px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Segoe UI', Arial, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+
+        h1 {
+            color: white;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            margin-bottom: 10px;
+        }
+
+        .controls {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 8px;
+            backdrop-filter: blur(10px);
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .controls button {
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+
+        .controls button:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .controls button.active {
+            background: rgba(76, 175, 80, 0.5);
+            border-color: rgba(76, 175, 80, 0.7);
+        }
+
+        .info {
+            color: rgba(255, 255, 255, 0.9);
+            font-size: 14px;
+        }
+
+        /* Pinned Modal Styles */
+        .rendercad-loading-modal {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.75);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 8px;
+            padding: 0;
+            color: white;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            width: 60px;
+            height: 60px;
+            z-index: 1000000;
+        }
+
+        .rendercad-header {
+            pointer-events: auto;
+            cursor: move;
+            position: relative;
+            width: 100%;
+            height: 60px;
+            padding: 0;
+            margin: 0;
+        }
+
+        .rendercad-logo-button {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: linear-gradient(-75deg, rgba(255,255,255,0.05), rgba(255,255,255,0.2), rgba(255,255,255,0.05));
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            padding: 0;
+            margin: 0;
+            pointer-events: auto;
+            z-index: 1000003;
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.05),
+                        inset 0 -1px 1px rgba(255, 255, 255, 0.5),
+                        0 2px 4px rgba(0, 0, 0, 0.2);
+            outline: none;
+        }
+
+        .rendercad-logo-button:hover {
+            background: linear-gradient(-75deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3), rgba(255,255,255,0.1));
+            border-color: rgba(255, 255, 255, 0.7);
+            box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.05),
+                        inset 0 -1px 1px rgba(255, 255, 255, 0.5),
+                        0 2px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .rendercad-logo-button img {
+            width: 26px;
+            height: 26px;
+            pointer-events: none;
+            user-select: none;
+            display: block;
+        }
+
+        .rendercad-circular-loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 48px;
+            height: 48px;
+            border: 1px solid transparent;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 1000002;
+            display: none;
+            overflow: visible;
+            animation: rendercad-spin 1s linear infinite;
+        }
+
+        .rendercad-circular-loader.active {
+            display: block;
+        }
+
+        @keyframes rendercad-spin {
+            0% {
+                transform: translate(-50%, -50%) rotate(0deg);
+            }
+            100% {
+                transform: translate(-50%, -50%) rotate(360deg);
+            }
+        }
+
+        .rendercad-circular-glow {
+            position: absolute;
+            top: -16px;
+            left: -16px;
+            width: calc(100% + 32px);
+            height: calc(100% + 32px);
+            border-radius: 50%;
+            background: conic-gradient(from 0deg,
+                cyan 0deg,
+                #faff70 43.2deg,
+                pink 86.4deg,
+                #faff70 129.6deg,
+                cyan 172.8deg,
+                #faff70 216deg,
+                pink 259.2deg,
+                #faff70 302.4deg,
+                cyan 345.6deg,
+                cyan 360deg);
+            mask-image: radial-gradient(circle,
+                transparent 0px,
+                transparent 20px,
+                rgba(0,0,0,0.2) 20.5px,
+                rgba(0,0,0,0.6) 21px,
+                black 21.5px,
+                black 22.5px,
+                rgba(0,0,0,0.6) 23px,
+                rgba(0,0,0,0.3) 24px,
+                rgba(0,0,0,0.15) 25px,
+                rgba(0,0,0,0.05) 27px,
+                transparent 30px);
+            -webkit-mask-image: radial-gradient(circle,
+                transparent 0px,
+                transparent 20px,
+                rgba(0,0,0,0.2) 20.5px,
+                rgba(0,0,0,0.6) 21px,
+                black 21.5px,
+                black 22.5px,
+                rgba(0,0,0,0.6) 23px,
+                rgba(0,0,0,0.3) 24px,
+                rgba(0,0,0,0.15) 25px,
+                rgba(0,0,0,0.05) 27px,
+                transparent 30px);
+            filter: blur(4px);
+            opacity: 1;
+            pointer-events: none;
+            z-index: 1;
+            animation: rendercad-glow-rotate 3.6s linear infinite;
+        }
+
+        @keyframes rendercad-glow-rotate {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>RENDERCAD Pinned Modal Test</h1>
+
+    <div class="controls">
+        <button id="toggleLoading">Toggle Loading Animation</button>
+        <span class="info" id="status">Loading: OFF</span>
+    </div>
+
+    <div class="info" style="max-width: 600px; text-align: center;">
+        <p><strong>Test Instructions:</strong></p>
+        <ul style="text-align: left; display: inline-block;">
+            <li>Click "Toggle Loading Animation" to start/stop the circular glow</li>
+            <li>The logo button should be perfectly centered in the 60×60px modal</li>
+            <li>The circular glow should animate around the outside of the button</li>
+            <li>Colors should flow: cyan → yellow → pink → yellow → cyan</li>
+            <li><strong>PIN/UNPIN TEST:</strong> Pin/unpin the browser extension toolbar - modal should stay in position</li>
+            <li><strong>RESIZE TEST:</strong> Resize browser window - modal positioning should update smoothly</li>
+        </ul>
+    </div>
+
+    <div class="info" style="max-width: 600px; text-align: center; background: rgba(76, 175, 80, 0.2); padding: 15px; border-radius: 8px;">
+        <p style="margin: 0; font-weight: 600;">✓ Extension Resize Fix Applied</p>
+        <p style="margin: 5px 0 0 0; font-size: 13px; opacity: 0.9;">
+            The content.js now includes multiple resize listeners:<br>
+            • window.resize (standard resize)<br>
+            • ResizeObserver (DOM changes)<br>
+            • visualViewport resize/scroll (toolbar pin/unpin)<br>
+            All with debouncing and proper cleanup!
+        </p>
+    </div>
+
+    <!-- Pinned Modal -->
+    <div class="rendercad-loading-modal">
+        <div class="rendercad-header">
+            <button class="rendercad-logo-button">
+                <img src="icons/logo.svg" alt="RENDERCAD" onerror="this.src='icons/logo.png'">
+            </button>
+            <div class="rendercad-circular-loader">
+                <div class="rendercad-circular-glow"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const toggleBtn = document.getElementById('toggleLoading');
+        const statusText = document.getElementById('status');
+        const circularLoader = document.querySelector('.rendercad-circular-loader');
+        let isLoading = false;
+
+        toggleBtn.addEventListener('click', () => {
+            isLoading = !isLoading;
+            if (isLoading) {
+                circularLoader.classList.add('active');
+                toggleBtn.classList.add('active');
+                statusText.textContent = 'Loading: ON';
+            } else {
+                circularLoader.classList.remove('active');
+                toggleBtn.classList.remove('active');
+                statusText.textContent = 'Loading: OFF';
+            }
+        });
+
+        // Make modal draggable
+        const modal = document.querySelector('.rendercad-loading-modal');
+        const header = document.querySelector('.rendercad-header');
+        let isDragging = false;
+        let currentX;
+        let currentY;
+        let initialX;
+        let initialY;
+
+        header.addEventListener('mousedown', (e) => {
+            if (e.target.closest('.rendercad-logo-button')) return;
+
+            isDragging = true;
+            initialX = e.clientX - modal.offsetLeft;
+            initialY = e.clientY - modal.offsetTop;
+            header.style.cursor = 'grabbing';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+
+            e.preventDefault();
+            currentX = e.clientX - initialX;
+            currentY = e.clientY - initialY;
+
+            modal.style.left = currentX + 'px';
+            modal.style.top = currentY + 'px';
+            modal.style.right = 'auto';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                header.style.cursor = 'move';
+            }
+        });
+
+        // Logo button click effect
+        const logoButton = document.querySelector('.rendercad-logo-button');
+        logoButton.addEventListener('click', () => {
+            alert('Capture & Render button clicked!\n\nIn the extension, this would start a screen capture.');
+        });
+    </script>
+</body>
+</html>

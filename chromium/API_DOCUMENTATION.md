@@ -1,4 +1,4 @@
-# RenderCAD AI API Documentation
+# RENDERCAD AI API Documentation
 
 ## Overview
 

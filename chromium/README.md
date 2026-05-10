@@ -1,11 +1,11 @@
-# RenderCAD Chrome Extension
+# RENDERCAD Chrome Extension
 
 Transform CAD screenshots into photorealistic renders using AI-powered image generation.
 
 ## Features
 
 - **Screen Capture Tool**: Click and drag to select any portion of your screen containing CAD models
-- **AI Rendering**: Powered by RenderCAD's AI to convert CAD wireframes into photorealistic 3D renders
+- **AI Rendering**: Powered by RENDERCAD's AI to convert CAD wireframes into photorealistic 3D renders
 - **Side-by-Side Comparison**: Interactive slider to compare original CAD vs AI-rendered images
 - **Easy Download**: Save both original and rendered images
 - **Secure Authentication**: OAuth-based device code flow for secure login
@@ -23,7 +23,7 @@ Transform CAD screenshots into photorealistic renders using AI-powered image gen
    - Select the `BrowserExtension` folder
 
 3. **Sign In**
-   - Click the RenderCAD extension icon
+   - Click the RENDERCAD extension icon
    - Click "Sign In" in the popup
    - A new tab will open with a verification code
    - Follow the instructions to authorize the extension
@@ -32,7 +32,7 @@ Transform CAD screenshots into photorealistic renders using AI-powered image gen
 ## Usage
 
 1. **Start Capture**
-   - Click the RenderCAD extension icon in Chrome
+   - Click the RENDERCAD extension icon in Chrome
    - If not logged in, click "Sign In" first
    - Click "Capture & Render" in the popup
 
@@ -52,13 +52,13 @@ Transform CAD screenshots into photorealistic renders using AI-powered image gen
 ## Account Management
 
 - **View Usage**: Click the extension icon to see your current rendering usage and limits
-- **Logout**: Right-click the extension icon and select "Logout from RenderCAD", or click "Logout" in the popup
+- **Logout**: Right-click the extension icon and select "Logout from RENDERCAD", or click "Logout" in the popup
 - **Login Status**: A green checkmark badge on the icon indicates you're logged in
 
 ## Requirements
 
 - Chrome browser (Manifest V3 support)
-- RenderCAD account (sign up at https://rendercad.ai)
+- RENDERCAD account (sign up at https://rendercad.ai)
 - Internet connection for AI processing
 
 ## Troubleshooting
@@ -72,7 +72,7 @@ Transform CAD screenshots into photorealistic renders using AI-powered image gen
 
 - **Secure Authentication**: OAuth-based device code flow, no passwords stored in the extension
 - **Token Storage**: Your authentication token is stored securely in Chrome's local storage
-- **Image Processing**: Images are sent to RenderCAD's API for AI processing
+- **Image Processing**: Images are sent to RENDERCAD's API for AI processing
 - **HTTPS**: All communication with the API is encrypted via HTTPS
 
 ## Performance & Efficiency

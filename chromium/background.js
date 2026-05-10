@@ -1,12 +1,42 @@
-// RenderCAD Background Script (Manifest V3)
-const RENDERCAD_BASE_URL = "https://rendercad.ai";
-const DEBUG = false; // Set to true to enable debug logging
+// RENDERCAD Background Script (Manifest V3)
+const DEV_MODE = false; // Set to true for dev.rendercad.ai, false for production
+const RENDERCAD_BASE_URL = DEV_MODE ? "https://dev.rendercad.ai" : "https://rendercad.ai";
+const RENDERCAD_API_URL = `${RENDERCAD_BASE_URL}/backend`;
+const DEBUG = false; // Set to true to enable verbose console logging
+const DEFAULT_RENDER_OPTIONS = {
+    model: 'pro',
+    quality: 'standard',
+    render_mode: 'preserve',
+    background_style: 'auto',
+    condition: 'auto',
+    custom_instructions: ''
+};
+
+function normalizeRenderMode(mode) {
+    return ['preserve', 'creative', 'freeform'].includes(mode) ? mode : 'preserve';
+}
+
+function normalizeUserInfo(authData) {
+    const user = authData?.user || {};
+
+    return {
+        email: user.email || user.id || 'User',
+        user_id: user.id,
+        plan: user.subscription_plan || user.plan_name || user.plan_code || 'free',
+        monthly_renders_used: user.monthly_renders_used ?? user.credits_used_this_month ?? 0,
+        monthly_render_limit: user.monthly_render_limit ?? user.monthly_credit_limit ?? 0,
+        grant_tokens_remaining: user.grant_tokens_remaining ?? 0,
+        pooled_tokens_remaining: user.pooled_tokens_remaining ?? 0,
+        token_valid: authData?.token_valid === true,
+        token_costs: authData?.token_costs || null
+    };
+}
 
 // Clean, structured debug logger
 function debug(category, message, data = null) {
     if (DEBUG) {
         const timestamp = new Date().toISOString().substr(11, 8);
-        const prefix = `[RenderCAD ${timestamp}] ${category}:`;
+        const prefix = `[RENDERCAD ${timestamp}] ${category}:`;
         if (data) {
             console.log(prefix, message, data);
         } else {
@@ -24,6 +54,7 @@ let tokenValidationCache = {
     token: null
 };
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+let authPromise = null;
 
 // Token management functions
 async function getStoredToken() {
@@ -37,11 +68,11 @@ async function storeToken(token) {
 }
 
 async function clearToken() {
-    console.log('[RenderCAD] Clearing token and user info');
+    console.log('[RENDERCAD] Clearing token and user info');
     await chrome.storage.local.remove(['rendercad_token', 'rendercad_user_info']);
     // Clear validation cache
     tokenValidationCache = { isValid: false, timestamp: 0, token: null };
-    console.log('[RenderCAD] Token cleared, updating icon to logged out state');
+    console.log('[RENDERCAD] Token cleared, updating icon to logged out state');
     await updateIconState(false);
 }
 
@@ -69,7 +100,7 @@ async function validateToken(token, storeInfo = true) {
 
     try {
         debug('AUTH', 'Validating token with backend', { tokenPrefix: token.substring(0, 8) + '...' });
-        const response = await fetch(`${RENDERCAD_BASE_URL}/backend/auth.php?action=check`, {
+        const response = await fetch(`${RENDERCAD_API_URL}/auth.php?action=check`, {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${token}`
@@ -78,23 +109,22 @@ async function validateToken(token, storeInfo = true) {
 
         if (!response.ok) {
             debug('AUTH', `Token validation failed with status ${response.status}`);
-            tokenValidationCache = { isValid: false, timestamp: now, token };
-            return false;
+            if (response.status === 401 || response.status === 403) {
+                tokenValidationCache = { isValid: false, timestamp: now, token };
+                return false;
+            }
+
+            // Treat server/rate/network-like failures as unknown, not invalid.
+            return tokenValidationCache.token === token && tokenValidationCache.isValid ? true : null;
         }
 
         const data = await response.json();
 
-        if (data.authenticated === true) {
+        if (data.authenticated === true && data.token_valid !== false) {
             debug('AUTH', 'Token validated successfully', { email: data.user?.email });
             // Store user info if available and requested
             if (storeInfo && data.user) {
-                await storeUserInfo({
-                    email: data.user.email || data.user.id || 'User',
-                    user_id: data.user.id,
-                    plan: data.user.subscription_plan || 'free',
-                    monthly_renders_used: data.user.monthly_renders_used || 0,
-                    monthly_render_limit: data.user.monthly_render_limit || 0
-                });
+                await storeUserInfo(normalizeUserInfo(data));
             }
             // Cache successful validation
             tokenValidationCache = { isValid: true, timestamp: now, token };
@@ -106,26 +136,28 @@ async function validateToken(token, storeInfo = true) {
         return false;
     } catch (error) {
         debug('AUTH', 'Token validation error', { error: error.message });
-        tokenValidationCache = { isValid: false, timestamp: now, token };
-        return false;
+        return tokenValidationCache.token === token && tokenValidationCache.isValid ? true : null;
     }
 }
 
 // Device code authentication flow
 async function requestDeviceCode() {
     try {
-        const formData = new FormData();
-        formData.append('app_name', 'RenderCAD Browser Extension');
-        formData.append('app_type', 'browser_extension');
-        formData.append('app_version', '1.2.0');
-
-        const response = await fetch(`${RENDERCAD_BASE_URL}/backend/auth.php?action=request_device_code`, {
+        const response = await fetch(`${RENDERCAD_API_URL}/auth.php?action=request_device_code`, {
             method: 'POST',
-            body: formData
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                app_name: 'RenderCAD Browser Extension',
+                app_type: 'browser-extension',
+                app_version: chrome.runtime.getManifest().version
+            })
         });
 
         if (!response.ok) {
-            throw new Error(`Failed to request device code: ${response.status}`);
+            const { message } = await readErrorPayload(response);
+            throw new Error(message || `Failed to request device code: ${response.status}`);
         }
 
         const data = await response.json();
@@ -142,6 +174,8 @@ async function requestDeviceCode() {
 
 async function pollForToken(code, pollInterval, expiresAt) {
     return new Promise((resolve, reject) => {
+        const interval = Math.max(1000, Number(pollInterval) || 3000);
+
         const poll = async () => {
             if (Date.now() > expiresAt) {
                 reject(new Error('Device code expired'));
@@ -149,28 +183,48 @@ async function pollForToken(code, pollInterval, expiresAt) {
             }
 
             try {
-                const response = await fetch(`${RENDERCAD_BASE_URL}/backend/auth.php?action=poll_device_code&code=${code}`);
+                const response = await fetch(`${RENDERCAD_API_URL}/auth.php?action=poll_device_code&code=${encodeURIComponent(code)}`);
 
                 if (!response.ok) {
-                    setTimeout(poll, pollInterval);
+                    if (response.status === 400 || response.status === 401 || response.status === 403 || response.status === 404) {
+                        const { message } = await readErrorPayload(response);
+                        reject(new Error(message || 'Authentication failed'));
+                        return;
+                    }
+
+                    setTimeout(poll, interval);
                     return;
                 }
 
                 const data = await response.json();
 
                 if (data.status === 'pending') {
-                    setTimeout(poll, pollInterval);
+                    setTimeout(poll, interval);
                 } else if (data.status === 'authorized') {
+                    if (!data.api_token) {
+                        reject(new Error('Authentication completed without a token'));
+                        return;
+                    }
                     resolve(data.api_token);
                 } else {
                     reject(new Error(data.message || 'Authentication failed'));
                 }
             } catch (error) {
-                setTimeout(poll, pollInterval);
+                setTimeout(poll, interval);
             }
         };
         poll();
     });
+}
+
+function getAuthPromise() {
+    if (!authPromise) {
+        authPromise = authenticateUser().finally(() => {
+            authPromise = null;
+        });
+    }
+
+    return authPromise;
 }
 
 async function authenticateUser() {
@@ -182,7 +236,11 @@ async function authenticateUser() {
         debug('Device code received:', deviceCodeData.code);
 
         // Open browser for user authentication
-        await chrome.tabs.create({ url: deviceCodeData.verification_url });
+        let verifyUrl = deviceCodeData.verification_url;
+        if (DEV_MODE && verifyUrl.includes('rendercad.ai') && !verifyUrl.includes('dev.rendercad.ai')) {
+            verifyUrl = verifyUrl.replace('rendercad.ai', 'dev.rendercad.ai');
+        }
+        await chrome.tabs.create({ url: verifyUrl });
 
         // Poll for token
         const expiresAt = Date.now() + (deviceCodeData.expires_in * 1000);
@@ -192,25 +250,47 @@ async function authenticateUser() {
 
         // Store the token
         await storeToken(token);
+        const isValid = await validateToken(token, true);
+        if (isValid === false) {
+            await clearToken();
+            throw new Error('Received token could not be validated');
+        }
         debug('Authentication successful, token stored');
+
+        // Notify user that authentication succeeded
+        chrome.notifications.create({
+            type: 'basic',
+            iconUrl: 'icons/logo-48.png',
+            title: 'RENDERCAD - Signed In',
+            message: 'You are now signed in and ready to capture and render CAD images.'
+        });
 
         return token;
     } catch (error) {
         console.error('Authentication failed:', error);
+        
+        // Notify user that authentication failed
+        chrome.notifications.create({
+            type: 'basic',
+            iconUrl: 'icons/logo-48.png',
+            title: 'RENDERCAD - Sign In Failed',
+            message: error.message || 'Failed to sign in. Please try again.'
+        });
+        
         throw error;
     }
 }
 
 // Icon state management (no badges)
 async function updateIconState(isLoggedIn) {
-    console.log('[RenderCAD] Updating icon state - isLoggedIn:', isLoggedIn);
+    console.log('[RENDERCAD] Updating icon state - isLoggedIn:', isLoggedIn);
 
     // Always keep badge empty (no overlays)
     await chrome.action.setBadgeText({ text: '' });
 
-    // Set icon to grayscale when logged out, normal when logged in
-    if (isLoggedIn) {
-        console.log('[RenderCAD] Setting color icon');
+    // Set icon to grayscale when logged out or in DEV_MODE, normal when logged in
+    if (isLoggedIn && !DEV_MODE) {
+        console.log('[RENDERCAD] Setting color icon');
         await chrome.action.setIcon({
             path: {
                 "16": "icons/logo-16.png",
@@ -219,7 +299,7 @@ async function updateIconState(isLoggedIn) {
             }
         });
     } else {
-        console.log('[RenderCAD] Setting greyscale icon');
+        console.log('[RENDERCAD] Setting greyscale icon');
         await chrome.action.setIcon({
             path: {
                 "16": "icons/logo-grey-16.png",
@@ -228,24 +308,25 @@ async function updateIconState(isLoggedIn) {
             }
         });
     }
-    console.log('[RenderCAD] Icon update complete');
+    console.log('[RENDERCAD] Icon update complete');
 }
 
 // Check initial login state and update icon
 async function checkInitialLoginState() {
-    console.log('[RenderCAD] Checking initial login state');
+    console.log('[RENDERCAD] Checking initial login state');
     const token = await getStoredToken();
-    console.log('[RenderCAD] Token found:', token ? 'YES' : 'NO');
+    console.log('[RENDERCAD] Token found:', token ? 'YES' : 'NO');
     if (token) {
-        console.log('[RenderCAD] Validating token...');
+        console.log('[RENDERCAD] Validating token...');
         const isValid = await validateToken(token);
-        console.log('[RenderCAD] Token valid:', isValid);
-        await updateIconState(isValid);
-        if (!isValid) {
+        console.log('[RENDERCAD] Token valid:', isValid);
+        if (isValid === false) {
             await clearToken();
+        } else {
+            await updateIconState(true);
         }
     } else {
-        console.log('[RenderCAD] No token, setting logged out state');
+        console.log('[RENDERCAD] No token, setting logged out state');
         await updateIconState(false);
     }
 }
@@ -257,7 +338,7 @@ chrome.action.onClicked.addListener(async (tab) => {
         
         // Check if this is a page where we can inject scripts
         if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('moz-extension://'))) {
-            console.warn('[RenderCAD] Cannot inject script on this page:', tab.url);
+            console.warn('[RENDERCAD] Cannot inject script on this page:', tab.url);
             return;
         }
         
@@ -275,31 +356,31 @@ chrome.action.onClicked.addListener(async (tab) => {
                     setTimeout(() => {
                         chrome.tabs.sendMessage(tab.id, { action: 'openModal' }, (response) => {
                             if (chrome.runtime.lastError) {
-                                console.error('[RenderCAD] Failed to open modal after injection:', chrome.runtime.lastError.message);
+                                console.error('[RENDERCAD] Failed to open modal after injection:', chrome.runtime.lastError.message);
                             } else {
                                 debug('ACTION', 'Modal opened successfully after injection');
                             }
                         });
                     }, 200);
                 }).catch(err => {
-                    console.error('[RenderCAD] Failed to inject script:', err);
+                    console.error('[RENDERCAD] Failed to inject script:', err);
                 });
             } else {
                 debug('ACTION', 'Modal opened successfully');
             }
         });
     } catch (error) {
-        console.error('[RenderCAD] Failed to open modal:', error);
+        console.error('[RENDERCAD] Failed to open modal:', error);
     }
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-    debug('RenderCAD extension installed');
+    debug('RENDERCAD extension installed');
 
     // Create context menu for logout
     chrome.contextMenus.create({
         id: 'logout',
-        title: 'Logout from RenderCAD',
+        title: 'Logout from RENDERCAD',
         contexts: ['action']
     });
 
@@ -315,16 +396,16 @@ chrome.runtime.onStartup.addListener(() => {
 // Handle context menu clicks
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (info.menuItemId === 'logout') {
-        console.log('[RenderCAD] Logout menu item clicked');
+        console.log('[RENDERCAD] Logout menu item clicked');
         await clearToken();
-        console.log('[RenderCAD] User logged out');
+        console.log('[RENDERCAD] User logged out');
 
         // Show notification
         chrome.notifications.create({
             type: 'basic',
             iconUrl: 'icons/logo.png',
             title: 'Logged Out',
-            message: 'You have been logged out from RenderCAD'
+            message: 'You have been logged out from RENDERCAD'
         });
     }
 });
@@ -339,13 +420,16 @@ async function getValidApiToken() {
         debug('AUTH', 'Found stored token, validating...');
         // Validate existing token
         const isValid = await validateToken(token);
-        if (isValid) {
+        if (isValid === true) {
             debug('AUTH', 'Stored token is valid');
             return token;
-        } else {
+        } else if (isValid === false) {
             debug('AUTH', 'Stored token is invalid, clearing and re-authenticating');
             // Clear invalid token
             await clearToken();
+        } else {
+            debug('AUTH', 'Token validation inconclusive, using stored token');
+            return token;
         }
     } else {
         debug('AUTH', 'No stored token found');
@@ -353,7 +437,7 @@ async function getValidApiToken() {
 
     // No valid token, authenticate user
     debug('AUTH', 'Starting authentication flow');
-    return await authenticateUser();
+    return await getAuthPromise();
 }
 
 // Listen for messages from content script and popup
@@ -366,12 +450,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const token = await getStoredToken();
             if (token) {
                 const isValid = await validateToken(token);
-                if (isValid) {
+                if (isValid === true) {
                     const userInfo = await getUserInfo();
                     sendResponse({ loggedIn: true, userInfo: userInfo || {} });
-                } else {
+                } else if (isValid === false) {
                     await clearToken();
                     sendResponse({ loggedIn: false });
+                } else {
+                    const userInfo = await getUserInfo();
+                    sendResponse({ loggedIn: !!userInfo, userInfo: userInfo || {}, authUnknown: true });
                 }
             } else {
                 sendResponse({ loggedIn: false });
@@ -391,8 +478,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'login') {
         (async () => {
             try {
-                await authenticateUser();
-                sendResponse({ success: true });
+                await getAuthPromise();
+                const userInfo = await getUserInfo();
+                sendResponse({ success: true, userInfo: userInfo || {} });
             } catch (error) {
                 sendResponse({ success: false, error: error.message });
             }
@@ -404,6 +492,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         (async () => {
             try {
                 debug('CAPTURE', 'Starting capture flow');
+                
+                // Check if this is a restricted page
+                const tab = await chrome.tabs.get(message.tabId);
+                if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('moz-extension://'))) {
+                    console.warn('[RENDERCAD] Cannot inject script on this page:', tab.url);
+                    sendResponse({ success: false, error: 'Cannot capture on browser system pages' });
+                    return;
+                }
+                
                 // Ensure we have a valid token before proceeding
                 await getValidApiToken();
                 debug('CAPTURE', 'Token validated, injecting content script');
@@ -414,10 +511,44 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     files: ['content.js']
                 });
 
-                // Send message to start screen capture
+                // Send message to start screen capture - wrap in promise to properly handle async
                 debug('CAPTURE', 'Sending startScreenCapture message to tab');
-                chrome.tabs.sendMessage(message.tabId, { action: 'startScreenCapture' });
-                sendResponse({ success: true });
+                
+                try {
+                    await new Promise((resolve, reject) => {
+                        chrome.tabs.sendMessage(message.tabId, { action: 'startScreenCapture' }, (response) => {
+                            if (chrome.runtime.lastError) {
+                                console.error('[RENDERCAD] Failed to send message to tab:', chrome.runtime.lastError.message);
+                                // Try injecting script again and retry
+                                debug('CAPTURE', 'Retrying script injection...');
+                                chrome.scripting.executeScript({
+                                    target: { tabId: message.tabId },
+                                    files: ['content.js']
+                                }).then(() => {
+                                    setTimeout(() => {
+                                        chrome.tabs.sendMessage(message.tabId, { action: 'startScreenCapture' }, (retryResponse) => {
+                                            if (chrome.runtime.lastError) {
+                                                console.error('[RENDERCAD] Retry failed:', chrome.runtime.lastError.message);
+                                                reject(new Error(chrome.runtime.lastError.message));
+                                            } else {
+                                                debug('CAPTURE', 'Retry succeeded');
+                                                resolve();
+                                            }
+                                        });
+                                    }, 100);
+                                }).catch(err => reject(err));
+                            } else {
+                                debug('CAPTURE', 'Message sent successfully to tab');
+                                resolve();
+                            }
+                        });
+                    });
+                    
+                    // Only send success after message was delivered
+                    sendResponse({ success: true });
+                } catch (sendError) {
+                    sendResponse({ success: false, error: sendError.message });
+                }
             } catch (error) {
                 debug('CAPTURE', 'Capture flow failed', { error: error.message });
                 sendResponse({ success: false, error: error.message });
@@ -449,11 +580,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.action === "captureScreen") {
+        console.log('[RENDERCAD Background] captureScreen message received:', message);
         // Process asynchronously - don't use sendResponse callback
         // We'll send the result via chrome.tabs.sendMessage instead
         (async () => {
             try {
                 debug("Processing captured area:", message.rect, "Job ID:", message.jobId);
+                console.log('[RENDERCAD Background] Starting capture processing...');
 
                 // Take screenshot of entire visible tab
                 const fullScreenshotDataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
@@ -470,13 +603,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
                 // Crop the screenshot to the selected area
                 const croppedDataUrl = await cropImage(fullScreenshotDataUrl, message.rect, tab, viewportWidth, viewportHeight);
-                debug("Image cropped, sending to RenderCAD API...");
+                debug("Image cropped, sending to RENDERCAD API...");
 
-                // Send to RenderCAD API for processing
-                const renderedImageUrl = await sendToRenderCAD(croppedDataUrl, message.rect);
+                // Send to RENDERCAD API for processing
+                const renderedImageUrl = await sendToRENDERCAD(croppedDataUrl, message.rect, message.renderMode);
 
                 // Send the rendered image back to the content script for inline display
-                console.log('[RenderCAD] Sending render result to content script, image size:', renderedImageUrl.length);
+                console.log('[RENDERCAD] Sending render result to content script, image size:', renderedImageUrl.length);
+                
+                // Notify user that render is complete
+                chrome.notifications.create({
+                    type: 'basic',
+                    iconUrl: 'icons/logo-48.png',
+                    title: 'RENDERCAD - Render Complete',
+                    message: 'Your CAD image has been rendered successfully!'
+                });
+                
                 chrome.tabs.sendMessage(sender.tab.id, {
                     action: 'displayRenderedImage',
                     originalImage: croppedDataUrl,
@@ -485,13 +627,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     jobId: message.jobId
                 }, (response) => {
                     if (chrome.runtime.lastError) {
-                        console.error('[RenderCAD] Failed to send message to content script:', chrome.runtime.lastError.message);
+                        console.error('[RENDERCAD] Failed to send message to content script:', chrome.runtime.lastError.message);
                     } else {
-                        console.log('[RenderCAD] Content script acknowledged receipt');
+                        console.log('[RENDERCAD] Content script acknowledged receipt');
                     }
                 });
             } catch (err) {
-                console.error("Error processing with RenderCAD API:", err);
+                console.error("Error processing with RENDERCAD API:", err);
+                
+                // Notify user of render error
+                chrome.notifications.create({
+                    type: 'basic',
+                    iconUrl: 'icons/logo-48.png',
+                    title: 'RENDERCAD - Render Failed',
+                    message: err.message || 'Failed to render image'
+                });
+                
                 chrome.tabs.sendMessage(sender.tab.id, {
                     action: 'renderError',
                     error: err.message,
@@ -513,13 +664,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
                 // Use the provided image data directly (no screenshot needed)
                 const imageDataUrl = message.imageData;
-                debug("Image data received, sending to RenderCAD API...");
+                debug("Image data received, sending to RENDERCAD API...");
 
-                // Send to RenderCAD API for processing
-                const renderedImageUrl = await sendToRenderCAD(imageDataUrl, message.rect);
+                // Send to RENDERCAD API for processing
+                const renderedImageUrl = await sendToRENDERCAD(imageDataUrl, message.rect, message.renderMode);
 
                 // Send the rendered image back to the content script for inline display
-                console.log('[RenderCAD] Sending re-render result to content script, image size:', renderedImageUrl.length);
+                console.log('[RENDERCAD] Sending re-render result to content script, image size:', renderedImageUrl.length);
                 chrome.tabs.sendMessage(sender.tab.id, {
                     action: 'displayRenderedImage',
                     originalImage: imageDataUrl,
@@ -528,13 +679,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     jobId: message.jobId
                 }, (response) => {
                     if (chrome.runtime.lastError) {
-                        console.error('[RenderCAD] Failed to send message to content script:', chrome.runtime.lastError.message);
+                        console.error('[RENDERCAD] Failed to send message to content script:', chrome.runtime.lastError.message);
                     } else {
-                        console.log('[RenderCAD] Content script acknowledged receipt');
+                        console.log('[RENDERCAD] Content script acknowledged receipt');
                     }
                 });
             } catch (err) {
-                console.error("Error re-rendering with RenderCAD API:", err);
+                console.error("Error re-rendering with RENDERCAD API:", err);
                 chrome.tabs.sendMessage(sender.tab.id, {
                     action: 'renderError',
                     error: err.message,
@@ -545,6 +696,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // Return false to indicate we won't use sendResponse
         return false;
+    }
+
+    if (message.action === 'openStudio') {
+        const url = DEV_MODE ? 'https://dev.rendercad.ai/studio' : 'https://rendercad.ai/render';
+        chrome.tabs.create({ url }, () => sendResponse({ success: true }));
+        return true;
+    }
+
+    if (message.action === 'notify') {
+        chrome.notifications.create({
+            type: 'basic',
+            iconUrl: 'icons/logo-48.png',
+            title: message.title,
+            message: message.message
+        }, () => sendResponse({ success: true }));
+        return true;
     }
 });
 
@@ -642,7 +809,7 @@ async function makeAuthenticatedRequest(url, options, retryCount = 0) {
 
         // Try to re-authenticate
         try {
-            await authenticateUser();
+            await getAuthPromise();
             // Retry the request with new token
             return await makeAuthenticatedRequest(url, options, retryCount + 1);
         } catch (error) {
@@ -654,197 +821,230 @@ async function makeAuthenticatedRequest(url, options, retryCount = 0) {
     return response;
 }
 
-// Function to send image to RenderCAD API
-async function sendToRenderCAD(imageData, rect) {
+async function readErrorPayload(response) {
+    let text = '';
+
+    try {
+        text = await response.text();
+    } catch (error) {
+        return { message: response.statusText || 'Unknown error', data: {} };
+    }
+
+    if (!text) {
+        return { message: response.statusText || 'Unknown error', data: {} };
+    }
+
+    try {
+        const data = JSON.parse(text);
+        return {
+            message: data.error_message || data.error || data.message || data.status_detail || response.statusText || 'Unknown error',
+            data
+        };
+    } catch (error) {
+        return { message: text, data: {} };
+    }
+}
+
+function isTokenLimitError(message) {
+    if (!message) {
+        return false;
+    }
+
+    const normalized = message.toLowerCase();
+    return normalized.includes('monthly render limit') ||
+        normalized.includes('credit') ||
+        normalized.includes('credits exhausted') ||
+        normalized.includes('exhausted') ||
+        normalized.includes('token');
+}
+
+async function dataUrlToBlob(dataUrl) {
+    const response = await fetch(dataUrl);
+    return response.blob();
+}
+
+async function parseApiJson(response, context) {
+    if (!response.ok) {
+        const { message, data } = await readErrorPayload(response);
+        if (response.status === 401 || response.status === 403) {
+            throw new Error('AUTH_REQUIRED');
+        }
+        if (response.status === 429 && isTokenLimitError(message)) {
+            throw new Error(`TOKEN_LIMIT_EXCEEDED:${data.used || data.credits_used || 0}:${data.limit || data.credits_limit || 0}:${message}`);
+        }
+        throw new Error(`${context} failed: ${message}`);
+    }
+
+    const data = await response.json();
+    if (data.success === false) {
+        const message = data.error_message || data.error || data.message || data.status_detail || `${context} returned unsuccessful`;
+        if (isTokenLimitError(message)) {
+            throw new Error(`TOKEN_LIMIT_EXCEEDED:${data.used || data.credits_used || 0}:${data.limit || data.credits_limit || 0}:${message}`);
+        }
+        throw new Error(message);
+    }
+
+    return data;
+}
+
+async function createRenderJob(renderMode) {
+    const response = await makeAuthenticatedRequest(
+        `${RENDERCAD_API_URL}/render.php?action=create_job`,
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                ...DEFAULT_RENDER_OPTIONS,
+                render_mode: normalizeRenderMode(renderMode)
+            })
+        }
+    );
+
+    const data = await parseApiJson(response, 'Create render job');
+    if (!data.job_id) {
+        throw new Error('Create render job returned no job ID');
+    }
+
+    return data;
+}
+
+async function presignUpload(jobId, slot, contentType) {
+    const response = await makeAuthenticatedRequest(
+        `${RENDERCAD_API_URL}/render.php?action=presign_upload`,
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                job_id: jobId,
+                slot,
+                content_type: contentType
+            })
+        }
+    );
+
+    const data = await parseApiJson(response, 'Upload initialization');
+    if (!data.presigned_url) {
+        throw new Error('Upload initialization returned no upload URL');
+    }
+
+    return data;
+}
+
+async function finalizeRenderJob(jobId) {
+    const response = await makeAuthenticatedRequest(
+        `${RENDERCAD_API_URL}/render.php?action=finalize_job`,
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ job_id: jobId })
+        }
+    );
+
+    return await parseApiJson(response, 'Finalize render job');
+}
+
+async function uploadToPresignedUrl(presignedUrl, imageBlob) {
+    const response = await fetch(presignedUrl, {
+        method: 'PUT',
+        headers: {
+            'Content-Type': imageBlob.type || 'image/png'
+        },
+        body: imageBlob
+    });
+
+    if (!response.ok) {
+        const { message } = await readErrorPayload(response);
+        throw new Error(`Image upload failed: ${message}`);
+    }
+}
+
+// Function to send image to RENDERCAD API
+async function sendToRENDERCAD(imageDataUrl, rect, renderMode) {
     debug('RENDER', 'Submitting render request', {
-        imageSize: `${(imageData.length / 1024).toFixed(0)}KB`,
-        dimensions: `${rect.width}x${rect.height}`
+        dimensions: `${rect.width}x${rect.height}`,
+        pipeline: 'create-presign-finalize',
+        renderMode: normalizeRenderMode(renderMode)
     });
 
     try {
-        // Submit render job with auto re-auth
-        const renderResponse = await makeAuthenticatedRequest(
-            `${RENDERCAD_BASE_URL}/backend/render.php?action=render`,
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    image: imageData,
-                    quality: "standard"
-                })
-            }
-        );
-
-        if (!renderResponse.ok) {
-            let errorText = '';
-            let errorData = {};
-            try {
-                errorText = await renderResponse.text();
-                // Try to parse as JSON
-                try {
-                    errorData = JSON.parse(errorText);
-                } catch (e) {
-                    // Not JSON, use as plain text
-                    errorData = { error: errorText, message: errorText };
-                }
-            } catch (e) {
-                errorText = 'Unknown error';
-                errorData = {};
-            }
-            
-            debug('RENDER', 'API returned error', {
-                status: renderResponse.status,
-                error: errorText.substring(0, 200),
-                errorData: errorData
-            });
-
-            // Special handling for 429 Too Many Requests (token limit exceeded)
-            if (renderResponse.status === 429) {
-                // Check if it's a token limit error - check for exact error message or keywords
-                const errorMsg = errorData.error || errorData.message || errorText || '';
-                const errorLower = errorMsg.toLowerCase();
-                if (errorData.error === 'Monthly render limit exceeded' || 
-                    errorLower.includes('monthly render limit') || 
-                    errorLower.includes('limit exceeded') ||
-                    errorLower.includes('token') || 
-                    errorLower.includes('monthly')) {
-                    throw new Error(`TOKEN_LIMIT_EXCEEDED:${errorData.used || 0}:${errorData.limit || 0}:${errorData.message || errorMsg}`);
-                }
-                throw new Error(`Too Many Requests - Please wait a moment before submitting another render. The API has rate limits to prevent overload.`);
-            }
-
-            throw new Error(`RenderCAD render request failed: ${renderResponse.status} - ${renderResponse.statusText}`);
-        }
-
-        const renderData = await renderResponse.json();
-
-        if (!renderData.success || !renderData.job_id) {
-            const errorMsg = renderData.error || 'Failed to submit render job';
-            debug('RENDER', 'Submission failed', { error: errorMsg });
-            throw new Error(errorMsg);
-        }
-
-        const jobId = renderData.job_id;
-        debug('RENDER', 'Job submitted successfully', { jobId });
-
-        // Poll for completion
-        return await pollRenderStatus(jobId);
+        const imageBlob = await dataUrlToBlob(imageDataUrl);
+        const jobData = await createRenderJob(renderMode);
+        const uploadSlot = jobData.required_uploads?.[0]?.slot || 'input_main';
+        const presignData = await presignUpload(jobData.job_id, uploadSlot, imageBlob.type || 'image/png');
+        await uploadToPresignedUrl(presignData.presigned_url, imageBlob);
+        await finalizeRenderJob(jobData.job_id);
+        return await pollRenderStatus(jobData.job_id);
     } catch (error) {
         if (error.message === 'AUTH_REQUIRED') {
-            debug('RENDER', 'Authentication required, showing notification');
-            // Show notification about session expiry
             chrome.notifications.create({
                 type: 'basic',
                 iconUrl: 'icons/logo.png',
                 title: 'Session Expired',
-                message: 'Please log in again to continue using RenderCAD'
+                message: 'Please log in again to continue using RENDERCAD'
             });
         }
+
         throw error;
     }
 }
 
 // Function to poll render status until completion
 async function pollRenderStatus(jobId) {
-    const maxAttempts = 60; // 60 attempts
+    const maxAttempts = 90; // 90 attempts
     const pollInterval = 2000; // 2 seconds
+    const inProgressStatuses = new Set(['uploading', 'pending', 'processing', 'queued']);
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
         debug(`Polling render status (attempt ${attempt + 1}/${maxAttempts})...`);
 
         const statusResponse = await makeAuthenticatedRequest(
-            `${RENDERCAD_BASE_URL}/backend/render.php?action=status&job_id=${jobId}`,
+            `${RENDERCAD_API_URL}/render.php?action=status&job_id=${encodeURIComponent(jobId)}`,
             {
                 method: "GET"
             }
         );
 
         if (!statusResponse.ok) {
-            // Check for 429 token limit error in status response
-            if (statusResponse.status === 429) {
-                let errorText = '';
-                let errorData = {};
-                try {
-                    errorText = await statusResponse.text();
-                    // Try to parse as JSON
-                    try {
-                        errorData = JSON.parse(errorText);
-                    } catch (e) {
-                        // Not JSON, use as plain text
-                        errorData = { error: errorText, message: errorText };
-                    }
-                } catch (e) {
-                    errorText = 'Monthly render limit reached';
-                    errorData = {};
-                }
-                const errorMsg = errorData.error || errorData.message || errorText || 'Monthly render limit reached';
-                throw new Error(`TOKEN_LIMIT_EXCEEDED:${errorData.used || 0}:${errorData.limit || 0}:${errorMsg}`);
+            const { message, data } = await readErrorPayload(statusResponse);
+
+            if (statusResponse.status === 429 && isTokenLimitError(message)) {
+                throw new Error(`TOKEN_LIMIT_EXCEEDED:${data.used || data.credits_used || 0}:${data.limit || data.credits_limit || 0}:${message}`);
             }
-            throw new Error(`Status check failed: ${statusResponse.status}`);
+
+            throw new Error(`Status check failed: ${message}`);
         }
 
         const statusData = await statusResponse.json();
         debug('Status response:', statusData);
 
         if (!statusData.success) {
-            // Check if error message indicates token limit
-            const errorMsg = statusData.error || statusData.message || '';
-            const errorLower = errorMsg.toLowerCase();
-            if (statusData.error === 'Monthly render limit exceeded' ||
-                errorLower.includes('monthly render limit') ||
-                errorLower.includes('limit exceeded') ||
-                errorLower.includes('token') || 
-                errorLower.includes('monthly')) {
-                throw new Error(`TOKEN_LIMIT_EXCEEDED:${statusData.used || 0}:${statusData.limit || 0}:${statusData.message || errorMsg}`);
+            const errorMsg = statusData.error_message || statusData.error || statusData.message || statusData.status_detail || '';
+            if (isTokenLimitError(errorMsg)) {
+                throw new Error(`TOKEN_LIMIT_EXCEEDED:${statusData.used || statusData.credits_used || 0}:${statusData.limit || statusData.credits_limit || 0}:${errorMsg}`);
             }
-            throw new Error('Status check returned unsuccessful');
+
+            throw new Error(errorMsg || 'Status check returned unsuccessful');
         }
 
         if (statusData.status === 'completed') {
-            // API now returns full R2 CDN URLs (https://cdn.rendercad.ai/...)
-            // Use directly if absolute, otherwise construct with base URL
-            const imageUrl = statusData.output_url.startsWith('http')
-                ? statusData.output_url
-                : `${RENDERCAD_BASE_URL}${statusData.output_url}`;
-            debug('Render completed, fetching from:', imageUrl);
-
-            // Fetch the image and convert to data URL for inline display
-            debug('Attempting to fetch image from URL:', imageUrl);
-
-            // R2 CDN URLs are publicly accessible (no auth needed)
-            const imageResponse = statusData.output_url.startsWith('http')
-                ? await fetch(imageUrl, { method: 'GET', mode: 'cors' })
-                : await makeAuthenticatedRequest(imageUrl, { method: 'GET', mode: 'cors' });
-
-            debug('Image fetch response status:', imageResponse.status);
-            debug('Image fetch response headers:', Object.fromEntries(imageResponse.headers.entries()));
-
-            if (!imageResponse.ok) {
-                const errorText = await imageResponse.text();
-                console.error('Failed to fetch image:', errorText);
-                throw new Error(`Failed to fetch rendered image: ${imageResponse.status} - ${errorText}`);
+            const imageUrl = statusData.asset_url || statusData.output_url;
+            if (!imageUrl) {
+                throw new Error('Render completed without an image URL');
             }
 
-            const blob = await imageResponse.blob();
-            debug('Image blob size:', blob.size, 'type:', blob.type);
-
-            if (blob.size === 0) {
-                throw new Error('Received empty image from server');
-            }
-
-            // Validate that it's actually an image (allow empty type from R2 CDN)
-            if (blob.type && !blob.type.startsWith('image/')) {
-                console.error('Received non-image blob:', blob.type);
-                throw new Error(`Received non-image data: ${blob.type}`);
-            }
-
-            const dataUrl = await blobToDataURL(blob);
-            debug('Converted to data URL, length:', dataUrl.length);
-            return dataUrl;
+            return await resolveRenderedImageSource(statusData);
         } else if (statusData.status === 'failed') {
-            throw new Error('Render job failed');
+            throw new Error(statusData.error_message || statusData.error || statusData.message || statusData.status_detail || 'Render job failed');
+        } else if (statusData.status === 'canceled' || statusData.status === 'cancelled') {
+            throw new Error('Render was canceled');
+        } else if (!inProgressStatuses.has(statusData.status)) {
+            throw new Error(`Unexpected render status: ${statusData.status || 'unknown'}`);
         }
 
         // Wait before next poll
@@ -852,6 +1052,53 @@ async function pollRenderStatus(jobId) {
     }
 
     throw new Error('Render timeout - job did not complete in time');
+}
+
+function normalizeRenderUrl(url) {
+    let imageUrl = String(url || '').trim();
+    if (!imageUrl) {
+        return '';
+    }
+
+    if (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://') && !imageUrl.startsWith('//')) {
+        imageUrl = `${RENDERCAD_BASE_URL}${imageUrl.startsWith('/') ? '' : '/'}${imageUrl}`;
+    } else if (imageUrl.startsWith('//')) {
+        imageUrl = `https:${imageUrl}`;
+    }
+
+    return imageUrl;
+}
+
+function shouldAuthorizeImageFetch(imageUrl) {
+    try {
+        const parsed = new URL(imageUrl);
+        return parsed.hostname === new URL(RENDERCAD_BASE_URL).hostname && parsed.pathname.startsWith('/backend/');
+    } catch (error) {
+        return false;
+    }
+}
+
+async function resolveRenderedImageSource(statusData) {
+    const imageUrl = normalizeRenderUrl(statusData.asset_url || statusData.output_url);
+    if (!shouldAuthorizeImageFetch(imageUrl)) {
+        return imageUrl;
+    }
+
+    const token = await getStoredToken();
+    const imageResponse = await fetch(imageUrl, {
+        method: 'GET',
+        headers: {
+            'Authorization': `Bearer ${token}`
+        }
+    });
+
+    if (!imageResponse.ok) {
+        const { message } = await readErrorPayload(imageResponse);
+        throw new Error(`Failed to fetch rendered image: ${message}`);
+    }
+
+    const blob = await imageResponse.blob();
+    return await blobToDataURL(blob);
 }
 
 // Helper function to convert blob to data URL
@@ -863,4 +1110,3 @@ function blobToDataURL(blob) {
         reader.readAsDataURL(blob);
     });
 }
-
